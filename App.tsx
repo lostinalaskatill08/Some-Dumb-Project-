@@ -579,7 +579,7 @@ setError(e instanceof Error ? e.message : 'An unknown error occurred during sale
   const renderCurrentStep = () => {
     const stepComponentMap = [
         // Regular Flow
-        { step: 1, flow: 'regular', component: <Step1RoleAndLocation formData={formData} onDataChange={handleDataChange} onBulkDataChange={handleBulkDataChange} errors={errors} onStartConversation={() => handleStartConversation('GUIDANCE')} onLocationRequest={(onSuccess, onError) => navigator.geolocation.getCurrentPosition(onSuccess, onError)} /> },
+        { step: 1, flow: 'regular', component: <Step1RoleAndLocation formData={formData} onDataChange={handleDataChange} onBulkDataChange={handleBulkDataChange} errors={errors} onStartConversation={() => handleStartConversation('GUIDANCE')} onLocationRequest={(onSuccess, onError) => navigator.geolocation.getCurrentPosition(onSuccess, onError, { enableHighAccuracy: true, maximumAge: 0, timeout: 15000 })} /> },
         { step: 2, flow: 'regular', component: <Step2EnergyAudit formData={formData} onDataChange={handleDataChange} errors={errors} /> },
         { step: 3, flow: 'regular', component: <Step4Permitting result={analysisResults.permitting} loading={loadingStates.permitting} error={error} /> },
         { step: 4, flow: 'regular', component: <Step3Analysis results={analysisResults} loadingStates={loadingStates} error={error} formData={formData} onDataChange={handleDataChange} /> },
