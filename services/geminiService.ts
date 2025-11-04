@@ -1,4 +1,3 @@
-
 import { GoogleGenAI, GenerateContentResponse } from "@google/genai";
 import type { FormData, AnalysisContent, SunroofData, EieData, HydroPreAnalysisData, GroundingChunk, UserRole } from '../types';
 import { HydroSourceType } from '../types';
@@ -19,11 +18,40 @@ interface LocationAnalysisResponse {
     coordinates?: { lat: number; lon: number };
 }
 
-interface GeocodeResponse {
-    lat: number | null;
-    lon: number | null;
-}
+/**
+ * A wrapper for the native fetch API that adds a timeout.
+ * @param {RequestInfo} resource - The resource to fetch.
+ * @param {RequestInit & { timeout?: number }} [options] - Fetch options including a timeout in milliseconds.
+ * @returns {Promise<Response>} A promise that resolves to the Response from the fetch call.
+ * @throws An error if the request times out or fails for other reasons.
+ */
+const fetchWithTimeout = async (resource: RequestInfo, options: RequestInit & { timeout?: number } = {}) => {
+  const { timeout = 10000 } = options; // Default 10-second timeout
 
+  const controller = new AbortController();
+  const id = setTimeout(() => controller.abort(), timeout);
+
+  try {
+    const response = await fetch(resource, {
+      ...options,
+      signal: controller.signal  
+    });
+    return response;
+  } catch (error) {
+    if (error instanceof DOMException && error.name === 'AbortError') {
+      throw new Error('The location service took too long to respond. Please try again.');
+    }
+    throw error; // Re-throw other errors
+  } finally {
+    clearTimeout(id);
+  }
+};
+
+/**
+ * Generates a base prompt containing the core user profile, goals, and property information.
+ * @param {FormData} formData - The current application form data.
+ * @returns {string} A formatted string with the base context.
+ */
 const generateBasePrompt = (formData: FormData): string => {
     let prompt = `--- USER PROFILE & GOALS ---\n`;
     prompt += `Role: ${formData.role || 'Not specified'}\n`;
@@ -54,6 +82,13 @@ const generateBasePrompt = (formData: FormData): string => {
     return prompt;
 };
 
+/**
+ * Generates the full analysis context by combining the base prompt, location data, and permitting information.
+ * This context is passed to most of the analysis functions.
+ * @param {FormData} formData - The current application form data.
+ * @param {string} permittingText - The text result from the permitting analysis.
+ * @returns {string} A comprehensive context string for the Gemini API.
+ */
 const generateAnalysisContext = (formData: FormData, permittingText: string): string => {
     let context = "Here is the complete context for the Green Energy Analysis. Use all of this information to inform your response.\n\n";
     context += generateBasePrompt(formData);
@@ -73,7 +108,14 @@ const generateAnalysisContext = (formData: FormData, permittingText: string): st
     return context;
 };
 
-
+/**
+ * A generic function to run a query against the Gemini API.
+ * @param {string} prompt - The prompt to send to the model.
+ * @param {string} [model=MODEL_FLASH] - The model to use (e.g., 'gemini-2.5-flash').
+ * @param {boolean} [useSearch=false] - Whether to enable Google Search grounding for the query.
+ * @returns {Promise<AnalysisContent>} A promise that resolves to the analysis content, including text and sources.
+ * @throws An error if the API call fails.
+ */
 const runQuery = async (prompt: string, model: string = MODEL_FLASH, useSearch: boolean = false): Promise<AnalysisContent> => {
     try {
         const config: any = {};
@@ -100,6 +142,12 @@ const runQuery = async (prompt: string, model: string = MODEL_FLASH, useSearch: 
     }
 };
 
+/**
+ * Extracts a JSON object from a string, which may contain markdown code fences.
+ * @template T - The expected type of the parsed JSON object.
+ * @param {string} text - The text containing the JSON string.
+ * @returns {T | null} The parsed JSON object, or null if parsing fails.
+ */
 const extractJsonFromText = <T>(text: string): T | null => {
     const jsonRegex = /```json\s*([\s\S]*?)\s*```/;
     const match = text.match(jsonRegex);
@@ -124,132 +172,91 @@ const extractJsonFromText = <T>(text: string): T | null => {
     return null;
 };
 
+/**
+ * Converts a street address into geographic coordinates (latitude and longitude) using a deterministic geocoding service.
+ * @param {string} address - The street address to geocode.
+ * @returns {Promise<{ lat: number; lon: number } | null>} A promise resolving to coordinates or null if not found.
+ * @throws An error if the geocoding service call fails.
+ */
 const geocodeAddress = async (address: string): Promise<{ lat: number; lon: number } | null> => {
-    const prompt = `
-        You are a high-precision geocoding service. Your single task is to find the geographic coordinates for the given address and return them in a specific JSON format.
-
-        Address to geocode: "${address}"
-
-        **CRITICAL Instructions:**
-        1. Use your Google Maps knowledge to find the most accurate latitude and longitude.
-        2. Return ONLY a single, valid JSON object. Do not add any conversational text, markdown, or anything else.
-        3. The JSON object must have "lat" and "lon" keys with numeric values.
-
-        **Required JSON Output:**
-        \`\`\`json
-        {
-          "lat": <latitude>,
-          "lon": <longitude>
-        }
-        \`\`\`
-        
-        If you cannot find the address, return null values for lat and lon.
-    `;
-    try {
-        const response: GenerateContentResponse = await ai.models.generateContent({
-            model: MODEL_PRO,
-            contents: prompt,
-            config: { tools: [{ googleMaps: {} }] }, // Use googleMaps for better address lookups
-        });
-        
-        const data = extractJsonFromText<GeocodeResponse>(response.text);
-        if (data && data.lat !== null && data.lon !== null) {
-            return { lat: data.lat, lon: data.lon };
-        }
-        return null;
-
-    } catch (e) {
-        console.error(`Error geocoding address "${address}":`, e);
-        if (e instanceof Error) {
-           throw new Error(`Failed to get geocoding response from Gemini API: ${e.message}`);
-        }
-        throw new Error('An unknown error occurred while geocoding the address.');
+  const url = `https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/findAddressCandidates?singleLine=${encodeURIComponent(address)}&maxLocations=1&f=json`;
+  try {
+    const res = await fetchWithTimeout(url);
+    if (!res.ok) {
+        console.error(`ArcGIS geocode HTTP ${res.status}: ${await res.text()}`);
+        throw new Error(`Failed to geocode address. Service returned status ${res.status}.`);
     }
+    const data = await res.json();
+    const c = data?.candidates?.[0];
+    return c?.location ? { lat: c.location.y, lon: c.location.x } : null;
+  } catch(error) {
+    console.error("Error during geocodeAddress fetch:", error);
+    if (error instanceof Error) {
+        throw error;
+    }
+    throw new Error("Could not connect to the location service. Please check your network connection.");
+  }
 };
 
-interface ReverseGeocodeResponse {
-    address: string | null;
-}
-
+/**
+ * Converts geographic coordinates into a human-readable street address using a deterministic reverse geocoding service.
+ * @param {number} lat - The latitude.
+ * @param {number} lon - The longitude.
+ * @returns {Promise<string | null>} A promise resolving to the address string or null if not found.
+ * @throws An error if the reverse geocoding service call fails.
+ */
 const reverseGeocode = async (lat: number, lon: number): Promise<string | null> => {
-    const prompt = `
-        You are an expert-level geocoding system powered by Google Maps. Your SOLE purpose is to perform a high-precision reverse geocode lookup for the given coordinates.
-
-        Coordinates to reverse geocode:
-        - Latitude: ${lat}
-        - Longitude: ${lon}
-
-        **CRITICAL INSTRUCTIONS:**
-        1.  **Exact Address ONLY:** You MUST return the most precise street address available (e.g., "123 Main St, Anytown, USA 12345"). DO NOT return just a city, county, or general area.
-        2.  **JSON Format:** The output MUST be ONLY a single, valid JSON object. No other text, conversation, or markdown is permitted.
-        3.  **Required Schema:** The JSON object MUST follow this exact structure:
-            \`\`\`json
-            {
-              "address": "<The full, precise street address>"
-            }
-            \`\`\`
-        4.  **Failure Case:** If you cannot find a precise street-level address for the given coordinates, the value for "address" MUST be \`null\`.
-    `;
-    try {
-        const response: GenerateContentResponse = await ai.models.generateContent({
-            model: MODEL_PRO,
-            contents: prompt,
-            config: { tools: [{ googleMaps: {} }] },
-        });
-        
-        const data = extractJsonFromText<ReverseGeocodeResponse>(response.text);
-        if (data && data.address) {
-            return data.address;
-        }
-        console.warn(`Could not extract a precise address from reverse geocode response for (${lat}, ${lon}). Response text: ${response.text}`);
-        return null;
-
-    } catch (e) {
-        console.error(`Error reverse geocoding coordinates (${lat}, ${lon}):`, e);
-        if (e instanceof Error) {
-           throw new Error(`Failed to get reverse geocoding response from Gemini API: ${e.message}`);
-        }
-        throw new Error('An unknown error occurred while reverse geocoding coordinates.');
+  const url = `https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/reverseGeocode?location=${lon},${lat}&f=json`;
+  try {
+    const res = await fetchWithTimeout(url);
+    if (!res.ok) {
+        console.error(`ArcGIS reverseGeocode HTTP ${res.status}: ${await res.text()}`);
+        throw new Error(`Failed to find address for coordinates. Service returned status ${res.status}.`);
     }
+    const data = await res.json();
+    return data?.address?.LongLabel ?? null;
+  } catch (error) {
+    console.error("Error during reverseGeocode fetch:", error);
+    if (error instanceof Error) {
+        throw error;
+    }
+    throw new Error("Could not connect to the location service. Please check your network connection.");
+  }
 };
 
+/**
+ * Performs a comprehensive AI analysis of a specific location, optionally enhanced with user-provided text or images.
+ * It fetches data for Project Sunroof, Environmental Insights Explorer, and Hydropower potential.
+ * @param {number} lat - The latitude of the location.
+ * @param {number} lon - The longitude of the location.
+ * @param {string} address - The confirmed address of the location.
+ * @param {string} [pastedText] - Optional user-pasted text (e.g., from a utility bill).
+ * @returns {Promise<LocationAnalysisResponse | null>} A promise resolving to the structured analysis data.
+ * @throws An error if the API call fails.
+ */
 const analyzeLocationAndData = async (
     lat: number, 
     lon: number,
     address: string,
-    pastedText?: string, 
-    imageBase64?: string
+    pastedText?: string
 ): Promise<LocationAnalysisResponse | null> => {
 
-    let supplementaryDataPrompt = '';
-    if (pastedText) {
-        supplementaryDataPrompt += `
-        **User-provided Text (from Project Sunroof or similar):**
-        ---
-        ${pastedText}
-        ---
-        `;
-    }
-    if (imageBase64) {
-         supplementaryDataPrompt += `\n**An optional user-provided screenshot is included. Analyze it for additional context.**`;
-    }
+    const prompt = `
+        You are an AI assistant specializing in green energy analysis. Your task is to parse user-provided text, which is likely from Google's Project Sunroof or a similar solar calculator, and extract specific data points.
 
-    const prompt = `You are an expert AI assistant specializing in green energy analysis. Your task is to analyze a geographic location using a definitive address and its coordinates to gather relevant data.
-
-        **Primary Location:**
+        **Primary Location Context (for reference only):**
         - Address: ${address}
-        - Latitude: ${lat}
-        - Longitude: ${lon}
 
-        ${supplementaryDataPrompt}
+        **User-provided Text to Analyze:**
+        ---
+        ${pastedText || "No text provided."}
+        ---
 
         **CRITICAL Instructions:**
-        1.  **Use Definitive Location:** The provided address and coordinates are the definitive location for all analysis. Do not attempt to change or correct them. The 'location' field in your JSON output MUST be exactly "${address}".
-        2.  **Use Supplementary Data for Context:** Use the optional text and image to enrich your analysis. Extract solar metrics.
-        3.  **Perform Comprehensive Analysis:** Using the definitive address, perform searches to gather data for "Project Sunroof" (if applicable for the area), "Environmental Insights Explorer (EIE)", and a "Hydropower Pre-analysis".
-        4.  **Hydropower Analysis:** Investigate potential for in-pipe hydropower from the municipal water supply. If exact data is not found, provide a reasonable estimate for typical pipe diameter (inches), pressure (PSI), and flow (GPM) based on US municipal infrastructure, and clearly state it's an estimate.
-        5.  **Roof Pitch Analysis:** If an image is provided, visually estimate the roof pitch in degrees. If no image is available, estimate the pitch based on typical architectural styles for the given address/region.
-        6.  **Format Output:** Return a single, valid JSON object with the structure below. Do not include conversational text or markdown outside the JSON object.
+        1.  **Parse the Text:** Read the "User-provided Text" above and extract values for the fields in the JSON structure below.
+        2.  **Extract, Don't Invent:** Your primary goal is to find values *within the text*. If a specific value (like "roofPitch") is not mentioned in the text, you MUST return \`null\` for that field. Do not estimate or guess values.
+        3.  **Strict JSON Output:** Return ONLY a single, valid JSON object matching the structure below. Do not include any conversational text, markdown formatting like \`\`\`json, or any other characters outside the JSON object itself.
+        4.  **Location Field:** The 'location' field in your JSON output MUST be exactly "${address}".
 
         **Required JSON Output Structure:**
         \`\`\`json
@@ -261,51 +268,24 @@ const analyzeLocationAndData = async (
             "potentialSystemSizeKw": "...",
             "potentialYearlySavings": "...",
             "roofPitch": "...",
-            "rawText": "..."
+            "rawText": "Brief summary of data source, e.g., 'Data extracted from user-provided text.'"
           },
-          "eieData": {
-            "buildingEmissions": "...",
-            "transportationEmissions": "...",
-            "renewablePotential": "...",
-            "rawText": "..."
-          },
-          "hydroPreAnalysisData": {
-            "potentialSourceType": "...",
-            "nearestWaterBody": "...",
-            "distance": "...",
-            "estimatedPipeDiameterInches": ...,
-            "estimatedPressurePSI": ...,
-            "estimatedFlowGPM": ...,
-            "summaryText": "..."
-          },
+          "eieData": null,
+          "hydroPreAnalysisData": null,
           "coordinates": {
             "lat": ${lat},
             "lon": ${lon}
           }
         }
         \`\`\`
-        **Rules:**
-        - 'location' MUST be the full address provided to you: "${address}".
-        - All numeric values should be strings within \`sunroofData\`, but numbers in \`hydroPreAnalysisData\`.
-        - If a value cannot be found, return \`null\`.
-        - The \`rawText\` fields should briefly describe the data's origin (e.g., "Data extracted from coordinates and user-provided text.").`;
+        `;
     
     const promptParts: any[] = [{ text: prompt }];
 
-    if (imageBase64) {
-        promptParts.push({
-            inlineData: {
-                mimeType: 'image/jpeg',
-                data: imageBase64,
-            },
-        });
-    }
-
     try {
         const response: GenerateContentResponse = await ai.models.generateContent({
-            model: MODEL_PRO, // Use Pro for this complex task
+            model: MODEL_PRO, // Use Pro for this parsing task
             contents: { parts: promptParts },
-            config: { tools: [{ googleSearch: {}, googleMaps: {} }] },
         });
 
         const text = response.text;
@@ -319,7 +299,11 @@ const analyzeLocationAndData = async (
     }
 };
 
-
+/**
+ * Generates a guide on permitting, regulations, and incentives for a green energy project at a specific location.
+ * @param {FormData} formData - The current application form data.
+ * @returns {Promise<AnalysisContent>} A promise resolving to the permitting analysis content.
+ */
 const getPermittingAnalysis = async (formData: FormData): Promise<AnalysisContent> => {
     const prompt = `Generate a permitting and incentives guide for a green energy project in "${formData.location}". My role is "${formData.role}". The project involves technologies like solar, wind, and battery storage. Focus on:
 1.  **Key Local Authorities:** Identify the city/county/state agencies responsible for building permits, electrical permits, and environmental reviews.
@@ -330,9 +314,20 @@ Format the response clearly with markdown headings.`;
     return runQuery(prompt, MODEL_PRO, true);
 };
 
-
+/**
+ * Performs a basic energy audit based on the provided context.
+ * @param {string} analysisContext - The full analysis context string.
+ * @param {UserRole | null} role - The user's selected role.
+ * @returns {Promise<AnalysisContent>} The energy audit results.
+ */
 const getEnergyAudit = (analysisContext: string, role: UserRole | null) => runQuery(`As an energy auditor, perform a basic energy audit based on the full context provided below. Identify the top 3-5 areas for energy efficiency improvements (e.g., insulation, air sealing, appliance upgrades). Be specific, actionable, and tailor your recommendations to the user's role of "${role}".\n\n${analysisContext}`);
 
+/**
+ * Analyzes the solar energy potential for the given context, tailored to the user's role.
+ * @param {string} analysisContext - The full analysis context string.
+ * @param {UserRole | null} role - The user's selected role.
+ * @returns {Promise<AnalysisContent>} The solar analysis results.
+ */
 const getSolarAnalysis = (analysisContext: string, role: UserRole | null) => runQuery(`As a solar analyst, analyze the solar potential using the full context provided.
 Your analysis MUST be tailored to the user's role: **${role}**.
 - If 'Homeowner': Focus on system size (kW), cost, annual savings ($), and payback for a single rooftop.
@@ -345,6 +340,12 @@ Use these constants for calculation: ${JSON.stringify(KNOWLEDGE_BASE.calculators
 
 **Full Context:**\n${analysisContext}`);
 
+/**
+ * Analyzes the wind energy potential, tailored to the user's role.
+ * @param {string} analysisContext - The full analysis context string.
+ * @param {UserRole | null} role - The user's selected role.
+ * @returns {Promise<AnalysisContent>} The wind analysis results.
+ */
 const getWindAnalysis = (analysisContext: string, role: UserRole | null) => runQuery(`As a wind energy analyst, analyze the small-scale wind potential. Tailor your response to the user's role: **${role}**.
 - If 'Homeowner': Assess feasibility for a single property based on yard size. Discuss noise and permitting.
 - If 'Community/Policymaker': Discuss distributed wind potential for the region and zoning considerations.
@@ -354,12 +355,25 @@ Use these constants for calculation: ${JSON.stringify(KNOWLEDGE_BASE.calculators
 
 **Full Context:**\n${analysisContext}`);
 
+/**
+ * Analyzes micro-hydropower potential, tailored to the user's role.
+ * @param {string} analysisContext - The full analysis context string.
+ * @param {UserRole | null} role - The user's selected role.
+ * @returns {Promise<AnalysisContent>} The hydro analysis results.
+ */
 const getHydroAnalysis = (analysisContext: string, role: UserRole | null) => runQuery(`As a hydropower analyst, analyze the micro-hydropower potential based on the provided context. Tailor the analysis for a **${role}**.
 **Task:** Based on any provided hydro details (source type, flow, head), calculate the potential power in Watts and annual energy in kWh. Discuss feasibility, environmental impact, and maintenance.
 Use these constants for calculation: ${JSON.stringify(KNOWLEDGE_BASE.calculators.hydro)}
 
 **Full Context:**\n${analysisContext}`);
 
+/**
+ * Analyzes battery storage needs based on energy usage and potential renewable generation.
+ * @param {string} analysisContext - The full analysis context string.
+ * @param {UserRole | null} role - The user's selected role.
+ * @param {string} renewableGenerationContext - Text from solar, wind, and hydro analyses.
+ * @returns {Promise<AnalysisContent>} The battery analysis results.
+ */
 const getBatteryAnalysis = (analysisContext: string, role: UserRole | null, renewableGenerationContext: string) => runQuery(`As a battery storage expert, analyze the energy storage needs. Your recommendation should be tailored to the user's role of **${role}** and their stated goals.
 **Renewable Generation Analysis Summary:**
 ${renewableGenerationContext}
@@ -368,6 +382,12 @@ ${renewableGenerationContext}
 
 **Full Context:**\n${analysisContext}`);
 
+/**
+ * Generates a financing guide with relevant options based on the user's role and project context.
+ * @param {string} analysisContext - The full analysis context string.
+ * @param {UserRole | null} role - The user's selected role.
+ * @returns {Promise<AnalysisContent>} The financing analysis results.
+ */
 const getFinancingAnalysis = (analysisContext: string, role: UserRole | null) => runQuery(`As a green energy finance expert, create a financing guide for a "${role}".
 **Task:** Based on the full project context, suggest the top 3-4 most relevant financing options from the provided knowledge base. For each, explain WHY it's a good fit for this user. Use search to find any specific local programs that apply.
 
@@ -376,6 +396,12 @@ ${JSON.stringify(FINANCING_DATA)}
 
 **Full Context:**\n${analysisContext}`);
 
+/**
+ * Synthesizes all individual analyses into a concise executive summary and action plan.
+ * @param {string} analysisContext - The user and project context.
+ * @param {string} fullAnalysisText - The combined text from all previous analysis steps.
+ * @returns {Promise<AnalysisContent>} The summary results.
+ */
 const getSummary = (analysisContext: string, fullAnalysisText: string) => runQuery(`Synthesize the following detailed analyses into a concise executive summary and actionable plan.
 **Task:** The summary should be written for the user whose profile is in the context below and must have:
 1.  **Overall Recommendation:** A clear "what you should do" statement.
@@ -389,6 +415,12 @@ ${fullAnalysisText}
 **User and Project Context:**
 ${analysisContext}`);
 
+/**
+ * Generates the final report, focusing on financial ROI and environmental impact calculations.
+ * @param {string} analysisContext - The user and project context.
+ * @param {string} fullAnalysisText - The combined text from all previous analysis steps.
+ * @returns {Promise<AnalysisContent>} The final report content.
+ */
 const getFinalReport = (analysisContext: string, fullAnalysisText: string) => {
     const prompt = `
     Generate a final report synthesizing the financial and environmental impact of the recommended green energy project.
@@ -422,11 +454,23 @@ const getFinalReport = (analysisContext: string, fullAnalysisText: string) => {
 };
 
 
-// Sales Flow
+// --- Sales Flow Functions ---
+
+/**
+ * Generates a market analysis for a specific technology in a given location.
+ * @param {FormData} formData - The current application form data, including selling technology and location.
+ * @returns {Promise<AnalysisContent>} The market analysis results.
+ */
 const getSalesTargetMarket = (formData: FormData) => runQuery(`I am a sales professional for "${formData.sellingTechnology}" in "${formData.location}". Generate a market analysis. Use Google Search to get current local data.
 1.  **Market Potential:** Briefly describe the market size and growth potential for this technology here.
 2.  **Ideal Customer Profile (ICP):** Define the primary target customer. Include demographics (e.g., income, homeownership), psychographics (e.g., values like environmentalism, tech adoption), and needs (e.g., high bills, desire for energy independence).
 3.  **Key Local Drivers:** Identify 2-3 local factors (e.g., high electricity rates, specific incentives, weather patterns, pro-solar policies) that make this a compelling market.`, MODEL_PRO, true);
+/**
+ * Generates key selling points and objection handling based on a target market.
+ * @param {FormData} formData - The current application form data.
+ * @param {string} targetMarketContext - The text from the target market analysis.
+ * @returns {Promise<AnalysisContent>} The selling points content.
+ */
 const getSalesSellingPoints = (formData: FormData, targetMarketContext: string) => runQuery(`Based on the target market for "${formData.sellingTechnology}" in "${formData.location}", create key selling points.
 Target Market Context:
 ${targetMarketContext}
@@ -435,6 +479,12 @@ Generate:
 1.  **Top 3 Value Propositions:** Create three concise statements that directly address the ICP's needs (e.g., "Take control of your rising electricity bills...").
 2.  **Objection Handling:** List two common objections (e.g., "It's too expensive," "Is it reliable?") and provide brief, effective responses.
 3.  **Local "Hook":** Create a compelling, location-specific opening line that references a local driver (e.g., "With [Utility Company]'s recent rate hikes...").`, MODEL_PRO);
+/**
+ * Devises a sales outreach strategy, including channels and competitor analysis.
+ * @param {FormData} formData - The current application form data.
+ * @param {string} salesContext - The combined text from market and selling point analyses.
+ * @returns {Promise<AnalysisContent>} The outreach strategy content.
+ */
 const getSalesOutreach = (formData: FormData, salesContext: string) => runQuery(`Given the target market and selling points for "${formData.sellingTechnology}" in "${formData.location}", devise an outreach strategy.
 Sales Context:
 ${salesContext}
@@ -443,6 +493,11 @@ Generate:
 1.  **Recommended Channels (Top 3):** Suggest the three most effective channels to reach the ICP (e.g., Local Community Events, Facebook Groups for [Town Name] Homeowners, Partnering with local roofers/builders). Justify each choice briefly.
 2.  **Competitor Snapshot:** Use Google Search to identify 1-2 major local competitors. Briefly state their main offering and one potential differentiator for my product.
 3.  **Sample Social Media Post:** Write a short, engaging post for Facebook or LinkedIn tailored to the ICP.`, MODEL_PRO, true);
+/**
+ * Compiles all sales analyses into a final, cohesive Sales & Marketing Playbook.
+ * @param {string} fullSalesAnalysis - The combined text from all previous sales analysis steps.
+ * @returns {Promise<AnalysisContent>} The final sales playbook summary.
+ */
 const getSalesSummary = (fullSalesAnalysis: string) => runQuery(`Compile the following sales analysis sections into a cohesive, actionable "Sales & Marketing Playbook". Structure it with clear headings for each section (Target Market, Selling Points, Outreach Strategy). Add a brief introductory and concluding paragraph.
 Full Analysis:
 ${fullSalesAnalysis}`, MODEL_PRO);

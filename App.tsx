@@ -1,5 +1,6 @@
 
 
+
 import React, { useState, useCallback, useMemo, useEffect, useRef } from 'react';
 import type { FormData, AnalysisResults, LoadingStates, AnalysisKey, SalesAnalysisKey, AnalysisContent, Project, Run, FormErrors } from './types';
 // FIX: Removed unused and undefined type imports LeedCertification, HVACSystem, and RoofType.
@@ -180,26 +181,46 @@ const initialLoadingStates: LoadingStates = Object.keys(initialAnalysisResults).
     return acc;
 }, {} as LoadingStates);
 
-
+/**
+ * The main application component for the Green Energy Candidate Analyzer.
+ * It manages the overall application state, including form data, analysis results,
+ * loading states, and the current step in the user workflow. It orchestrates
+ * the different steps and analysis calls to the Gemini service.
+ */
 const App: React.FC = () => {
+  /** State for all user-provided form data. */
   const [formData, setFormData] = useState<FormData>(initialFormData);
+  /** State for the results of all AI analyses. */
   const [analysisResults, setAnalysisResults] = useState<AnalysisResults>(initialAnalysisResults);
+  /** State to track loading status for each type of analysis. */
   const [loadingStates, setLoadingStates] = useState<LoadingStates>(initialLoadingStates);
+  /** State for storing general application errors. */
   const [error, setError] = useState<string | null>(null);
+  /** State for storing form validation errors. */
   const [errors, setErrors] = useState<FormErrors>({});
 
+  /** State for the current step in the multi-step form. */
   const [currentStep, setCurrentStep] = useState(1);
+  /** State to control the visibility of the user guide modal. */
   const [isGuideOpen, setIsGuideOpen] = useState(false);
+  /** State to control the visibility of the live conversation modal. */
   const [isConversationOpen, setIsConversationOpen] = useState(false);
+  /** State to set the context for the live conversation (general guidance or summary discussion). */
   const [conversationContext, setConversationContext] = useState<'GUIDANCE' | 'SUMMARY'>('GUIDANCE');
   
-  // New state for project management and sharing
+  /** State to determine if the app is in "shared report" view mode. */
   const [isShareView, setIsShareView] = useState(false);
+  /** State to hold the data for a shared report, parsed from the URL. */
   const [sharedData, setSharedData] = useState<{ formData: FormData, analysisResults: AnalysisResults } | null>(null);
+  /** State to provide visual feedback on the auto-saving status. */
   const [saveStatus, setSaveStatus] = useState<'idle' | 'saving' | 'saved'>('idle');
+  /** State to control the visibility of the "restore session" prompt. */
   const [showRestoreSession, setShowRestoreSession] = useState(false);
+  /** State to control the visibility of the project manager modal. */
   const [isProjectsModalOpen, setIsProjectsModalOpen] = useState(false);
+  /** State to hold all saved user projects. */
   const [projects, setProjects] = useState<Project[]>([]);
+  /** State to track the currently active/loaded project ID. */
   const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
 
   const saveTimeoutRef = useRef<number | null>(null);
@@ -254,7 +275,11 @@ const App: React.FC = () => {
       }
     };
   }, [formData, analysisResults, currentStep, activeProjectId, isShareView]);
-
+  
+  /**
+   * Handles the user's choice to restore or discard a previous session.
+   * @param {boolean} restore - True to restore the session, false to discard it.
+   */
   const handleRestoreSession = (restore: boolean) => {
     if (restore) {
       const lastSession = localStorage.getItem('green-energy-analyzer-session');
@@ -277,7 +302,12 @@ const App: React.FC = () => {
   const salesSteps = ['Role', 'Technology', 'Market', 'Selling Points', 'Outreach', 'Playbook'];
   
   const currentFlowSteps = isSalesFlow ? salesSteps : regularSteps;
-
+  
+  /**
+   * Callback to update a single field in the form data. Handles both simple values and array toggles.
+   * @param {keyof FormData} field - The name of the form field to update.
+   * @param {*} value - The new value for the field.
+   */
   const handleDataChange = useCallback((field: keyof FormData, value: any) => {
     // Clear error for the field being changed for better UX
     if (errors[field]) {
@@ -297,7 +327,12 @@ const App: React.FC = () => {
         setFormData(prev => ({ ...prev, [field]: value }));
     }
   }, [errors, formData]);
-
+  
+  /**
+   * Callback to update multiple form fields at once, typically from AI-driven data autofilling.
+   * @param {Partial<FormData>} updates - An object containing the fields and values to update.
+   * @param {(keyof FormData)[]} autoFilledKeys - An array of keys that were auto-filled to track for UI indicators.
+   */
   const handleBulkDataChange = useCallback((updates: Partial<FormData>, autoFilledKeys: (keyof FormData)[] = []) => {
     setFormData(prev => {
         const newFormData = { ...prev, ...updates };
@@ -494,7 +529,10 @@ setError(e instanceof Error ? e.message : 'An unknown error occurred during sale
     }
   }, [formData, analysisResults]);
 
-
+  /**
+   * Validates the form data for the current step.
+   * @returns {boolean} - True if the form is valid, false otherwise.
+   */
   const validateForm = () => {
     const newErrors: FormErrors = {};
     
@@ -530,7 +568,10 @@ setError(e instanceof Error ? e.message : 'An unknown error occurred during sale
     setErrors(newErrors);
     return Object.keys(newErrors).length === 0;
   };
-
+  
+  /**
+   * Handles advancing to the next step, validating the form and triggering the relevant analysis.
+   */
   const handleNext = useCallback(() => {
     if (!validateForm()) return;
 
@@ -550,7 +591,10 @@ setError(e instanceof Error ? e.message : 'An unknown error occurred during sale
       setCurrentStep(nextStep);
     }
   }, [currentStep, formData, isSalesFlow, runPermittingAnalysis, runRegularAnalysis, runSalesAnalysis, runSummary, runFinancing, runFinalReport, currentFlowSteps.length]);
-
+  
+  /**
+   * Handles returning to the previous step.
+   */
   const handleBack = useCallback(() => {
     if (currentStep > 1) {
       setErrors({}); // Clear errors when going back
@@ -558,6 +602,9 @@ setError(e instanceof Error ? e.message : 'An unknown error occurred during sale
     }
   }, [currentStep]);
   
+  /**
+   * Resets the entire application to its initial state for a new analysis.
+   */
   const startOver = () => {
       setCurrentStep(1);
       setFormData(initialFormData);
