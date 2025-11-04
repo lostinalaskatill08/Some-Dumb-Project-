@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Green Energy Candidate Analyzer</title>
+
+  <!-- Tailwind CSS via CDN for styling -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  
+  <!-- Leaflet CSS -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.css" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet.draw/1.0.4/leaflet.draw.css" />
+  <link rel="stylesheet" href="https://unpkg.com/esri-leaflet-geocoder@3.1.4/dist/esri-leaflet-geocoder.css" />
+
+  <style>
+    /* Basic styles for loading state and print */
+    body {
+      font-family: sans-serif;
+      background-color: #f8fafc; /* bg-slate-50 */
+    }
+    @media (prefers-color-scheme: dark) {
+      body {
+        background-color: #0f172a; /* dark:bg-slate-900 */
+      }
+    }
+    #root:empty::before {
+      content: "Loading Application...";
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      height: 100vh;
+      font-size: 1.5rem;
+      color: #64748b;
+    }
+    .printable-report, .printable-pack {
+      display: none;
+    }
+    @media print {
+      body * {
+        visibility: hidden;
+      }
+      body.print-report .printable-report, 
+      body.print-report .printable-report * {
+        visibility: visible;
+      }
+      body.print-pack .printable-pack, 
+      body.print-pack .printable-pack * {
+        visibility: visible;
+      }
+      body.print-report .printable-report, 
+      body.print-pack .printable-pack {
+        position: absolute;
+        left: 0;
+        top: 0;
+        width: 100%;
+      }
+    }
+  </style>
+
+  <script type="importmap">
+  {
+    "imports": {
+      "@google/genai": "https://aistudiocdn.com/@google/genai@^1.27.0",
+      "react/": "https://aistudiocdn.com/react@^19.2.0/",
+      "react": "https://aistudiocdn.com/react@^19.2.0",
+      "react-dom/": "https://aistudiocdn.com/react-dom@^19.2.0/",
+      "recharts": "https://aistudiocdn.com/recharts@^3.3.0"
+    }
+  }
+  </script>
+
+</head>
+<body>
+  <div id="root"></div>
+
+  <!-- Leaflet JS - Placed here for non-blocking loading -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet.draw/1.0.4/leaflet.draw.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/esri-leaflet/3.0.10/esri-leaflet.js"></script>
+  <script src="https://unpkg.com/esri-leaflet-geocoder@3.1.4/dist/esri-leaflet-geocoder.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet-geometryutil/0.9.3/leaflet.geometryutil.min.js"></script>
+
+  <script type="module" src="/index.tsx"></script>
+</body>
+</html>

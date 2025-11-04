@@ -1,0 +1,8 @@
+{
+  "name": "Copy of Green Energy Candidate Analyzer",
+  "description": "An application to help users from homeowners to policymakers assess their potential for adopting green energy solutions through a step-by-step analysis of weatherization, solar, wind, and other renewable sources.",
+  "requestFramePermissions": [
+    "microphone",
+    "geolocation"
+  ]
+}
