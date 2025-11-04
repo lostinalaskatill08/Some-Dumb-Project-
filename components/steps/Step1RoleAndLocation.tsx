@@ -30,29 +30,29 @@ const userRoles = [
 const Step1RoleAndLocation: React.FC<Step1Props> = ({ 
     formData, onDataChange, onBulkDataChange, errors, onStartConversation, onLocationRequest
 }) => {
-    const [isAnalyzing, setIsAnalyzing] = useState(false);
+    const [locationCoords, setLocationCoords] = useState<{lat: number, lon: number} | null>(null);
+    const [addressInput, setAddressInput] = useState('');
+    const [isLocating, setIsLocating] = useState(false);
     const [analysisData, setAnalysisData] = useState<{ sunroof: SunroofData | null; eie: EieData | null; hydro: HydroPreAnalysisData | null } | null>(null);
-    const [selectedCoords, setSelectedCoords] = useState<{lat: number, lon: number} | null>(null);
     const [analysisError, setAnalysisError] = useState<string | null>(null);
 
     const [mapStatus, setMapStatus] = useState<'idle' | 'countdown' | 'analyzing'>('idle');
     const [countdown, setCountdown] = useState(3);
     const countdownRef = useRef<number | null>(null);
 
-    // --- Optional & Manual Data States ---
     const [showOptional, setShowOptional] = useState(false);
     const [pastedText, setPastedText] = useState('');
     const [pastedImage, setPastedImage] = useState('');
-    const [addressInput, setAddressInput] = useState('');
-    const [isGeocoding, setIsGeocoding] = useState(false);
-
+    
+    const analysisPayloadRef = useRef<{coords: {lat: number, lon: number}, address: string} | null>(null);
+    
     const handleAnalyze = useCallback(async (coords: { lat: number; lon: number }, address: string) => {
         if (!coords || !address || !formData.role) return;
 
         if (countdownRef.current) clearInterval(countdownRef.current);
 
         setMapStatus('analyzing');
-        setIsAnalyzing(true);
+        setIsLocating(true); // Re-use isLocating for analysis phase as well
         setAnalysisError(null);
         setAnalysisData(null);
         
@@ -72,10 +72,9 @@ const Step1RoleAndLocation: React.FC<Step1Props> = ({
                 const updates: Partial<FormData> = {};
                 const autoFilledKeys: (keyof FormData)[] = [];
                 
-                // The AI confirms the location; update form data
                 if (location) {
                     updates.location = location;
-                    setAddressInput(location);
+                    setAddressInput(location); // Sync input with AI-confirmed location
                     onDataChange('location', location);
                 }
 
@@ -109,22 +108,15 @@ const Step1RoleAndLocation: React.FC<Step1Props> = ({
             console.error("Failed to analyze location data:", error);
             setAnalysisError(error instanceof Error ? error.message : "An error occurred during analysis. Please try again.");
         } finally {
-            setIsAnalyzing(false);
+            setIsLocating(false);
             setMapStatus('idle');
         }
     }, [formData.role, pastedText, pastedImage, onDataChange, onBulkDataChange]);
 
     const startAnalysisCountdown = useCallback((coords: { lat: number; lon: number }, address: string) => {
-        if (countdownRef.current) {
-            clearInterval(countdownRef.current);
-        }
-        setMapStatus('idle');
-        setAnalysisError(null);
+        if (countdownRef.current) clearInterval(countdownRef.current);
         
-        setSelectedCoords(coords);
-        setAddressInput(address);
-        onDataChange('location', address);
-
+        analysisPayloadRef.current = { coords, address };
         setMapStatus('countdown');
         setCountdown(3);
 
@@ -132,76 +124,94 @@ const Step1RoleAndLocation: React.FC<Step1Props> = ({
             setCountdown(prev => {
                 if (prev <= 1) {
                     clearInterval(countdownRef.current!);
-                    handleAnalyze(coords, address);
+                    if (analysisPayloadRef.current) {
+                        handleAnalyze(analysisPayloadRef.current.coords, analysisPayloadRef.current.address);
+                    }
                     return 0;
                 }
                 return prev - 1;
             });
         }, 1000);
-    }, [onDataChange, handleAnalyze]);
+    }, [handleAnalyze]);
 
-    const handleMapLocationSelect = useCallback(async (lat: number, lon: number) => {
-        if (!formData.role) return;
-    
-        setMapStatus('analyzing'); // Show immediate feedback for geocoding
-        setAnalysisError(null);
-        
-        try {
-            const address = await geminiService.reverseGeocode(lat, lon);
+    useEffect(() => {
+        if (!locationCoords) return;
 
-            if (address) {
-                startAnalysisCountdown({ lat, lon }, address);
-            } else {
-                throw new Error('No address found. Please click closer to a street or building.');
+        let isCancelled = false;
+        const processNewCoords = async () => {
+            setIsLocating(true);
+            setAnalysisError(null);
+            if (countdownRef.current) clearInterval(countdownRef.current);
+            setMapStatus('analyzing');
+
+            try {
+                const address = await geminiService.reverseGeocode(locationCoords.lat, locationCoords.lon);
+                if (isCancelled) return;
+
+                if (address) {
+                    setAddressInput(address);
+                    onDataChange('location', address);
+                    startAnalysisCountdown(locationCoords, address);
+                } else {
+                    throw new Error('No address found. Please click closer to a street or building.');
+                }
+            } catch (error) {
+                if (isCancelled) return;
+                const errorMessage = error instanceof Error ? error.message : "An unknown error occurred during reverse geocoding.";
+                setAnalysisError(errorMessage);
+                setMapStatus('idle');
+                setIsLocating(false);
             }
-        } catch (error) {
-            console.error("Reverse geocode failed:", error);
-            const errorMessage = error instanceof Error ? error.message : "An unknown error occurred during reverse geocoding.";
-            setAnalysisError(errorMessage);
-            setMapStatus('idle');
-        }
-    }, [formData.role, startAnalysisCountdown]);
+        };
+
+        processNewCoords();
+        return () => { isCancelled = true; };
+    }, [locationCoords, onDataChange, startAnalysisCountdown]);
+
+    const handleLocationSelect = useCallback((lat: number, lon: number) => {
+        if (!formData.role || isLocating) return;
+        setLocationCoords({ lat, lon });
+    }, [formData.role, isLocating]);
 
     const handleUseMyLocation = useCallback(() => {
-        if (!formData.role) return;
+        if (!formData.role || isLocating) return;
+        setIsLocating(true);
         onLocationRequest(
-            (position) => {
-                const { latitude, longitude } = position.coords;
-                handleMapLocationSelect(latitude, longitude);
-            },
+            (position) => setLocationCoords({ lat: position.coords.latitude, lon: position.coords.longitude }),
             (error) => {
                 console.error("Geolocation error:", error);
                 setAnalysisError("Could not retrieve your location. Please ensure you have granted permission.");
+                setIsLocating(false);
             }
         );
-    }, [formData.role, onLocationRequest, handleMapLocationSelect]);
+    }, [formData.role, onLocationRequest, isLocating]);
 
     const handleAddressSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
         const addressToGeocode = addressInput.trim();
-        if (!addressToGeocode || !formData.role) return;
+        if (!addressToGeocode || !formData.role || isLocating) return;
 
-        setIsGeocoding(true);
+        setIsLocating(true);
         setAnalysisError(null);
-        if (countdownRef.current) clearInterval(countdownRef.current);
         
-        const coords = await geminiService.geocodeAddress(addressToGeocode);
-        setIsGeocoding(false);
-
-        if (coords) {
-            startAnalysisCountdown(coords, addressToGeocode);
-        } else {
-            setAnalysisError(`Could not find location for "${addressToGeocode}". Please try a different address.`);
-            setMapStatus('idle');
+        try {
+            const coords = await geminiService.geocodeAddress(addressToGeocode);
+            if (coords) {
+                setLocationCoords(coords);
+            } else {
+                setAnalysisError(`Could not find location for "${addressToGeocode}". Please try a different address.`);
+                setIsLocating(false);
+            }
+        } catch (error) {
+            const errorMessage = error instanceof Error ? error.message : "An unknown error occurred during geocoding.";
+            setAnalysisError(errorMessage);
+            setIsLocating(false);
         }
     };
     
-    // Cleanup interval on unmount
-    useEffect(() => {
-        return () => {
-            if(countdownRef.current) clearInterval(countdownRef.current);
-        }
-    }, []);
+    useEffect(() => () => { if(countdownRef.current) clearInterval(countdownRef.current) }, []);
+    
+    const isBusy = isLocating || mapStatus !== 'idle';
 
     return (
         <div className="space-y-8 animate-fade-in">
@@ -237,31 +247,31 @@ const Step1RoleAndLocation: React.FC<Step1Props> = ({
                             onChange={e => setAddressInput(e.target.value)}
                             placeholder="Enter an address or click the map..."
                             className="w-full px-3 py-2 bg-slate-100 dark:bg-slate-700 border rounded-md shadow-sm focus:outline-none focus:ring-2 border-slate-300 dark:border-slate-600 focus:ring-green-500"
-                            disabled={!formData.role || isGeocoding}
+                            disabled={!formData.role || isBusy}
                         />
                         <button 
                             type="submit"
                             className="flex-shrink-0 px-4 py-2 text-sm font-semibold text-white bg-green-600 rounded-lg shadow-md hover:bg-green-700 transition-colors focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500 disabled:bg-slate-400 dark:disabled:bg-slate-600 disabled:cursor-not-allowed"
-                            disabled={!formData.role || isGeocoding || !addressInput.trim()}
+                            disabled={!formData.role || isBusy || !addressInput.trim()}
                         >
-                            {isGeocoding ? 'Finding...' : 'Find'}
+                            {isLocating ? 'Finding...' : 'Find'}
                         </button>
                     </form>
                     <span className="hidden sm:inline-block mx-2 text-slate-400">or</span>
                     <button
                         onClick={handleUseMyLocation}
-                        disabled={!formData.role}
+                        disabled={!formData.role || isBusy}
                         className="w-full sm:w-auto px-4 py-2 text-sm font-semibold text-white bg-blue-600 rounded-lg shadow-md hover:bg-blue-700 transition-colors focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:bg-slate-400 dark:disabled:bg-slate-600 disabled:cursor-not-allowed"
                     >
                         Use My Location
                     </button>
                 </div>
 
-                <p className="text-sm text-slate-500 dark:text-slate-400 mt-2">Find an address, or click the map below. After the address is confirmed, analysis will begin.</p>
+                <p className="text-sm text-slate-500 dark:text-slate-400 mt-2">Find an address, or double-click the map below. After the address is confirmed, analysis will begin.</p>
 
                 <MapDisplay
-                    centerCoords={selectedCoords}
-                    onLocationSelect={handleMapLocationSelect}
+                    centerCoords={locationCoords}
+                    onLocationSelect={handleLocationSelect}
                     analysisStatus={mapStatus}
                     countdown={countdown}
                     disabled={!formData.role}
@@ -302,8 +312,8 @@ const Step1RoleAndLocation: React.FC<Step1Props> = ({
                                 disabled={!formData.role}
                             />
                         </div>
-                        <button onClick={() => selectedCoords && handleAnalyze(selectedCoords, formData.location)} disabled={isAnalyzing || !selectedCoords || !formData.role} className="w-full flex items-center justify-center gap-2 px-6 py-2 font-bold text-white bg-green-600 rounded-lg shadow-md hover:bg-green-700 transition-colors focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500 disabled:bg-slate-400 dark:disabled:bg-slate-600 disabled:cursor-not-allowed">
-                            {isAnalyzing ? (
+                        <button onClick={() => locationCoords && formData.location && handleAnalyze(locationCoords, formData.location)} disabled={isBusy || !locationCoords || !formData.role} className="w-full flex items-center justify-center gap-2 px-6 py-2 font-bold text-white bg-green-600 rounded-lg shadow-md hover:bg-green-700 transition-colors focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500 disabled:bg-slate-400 dark:disabled:bg-slate-600 disabled:cursor-not-allowed">
+                            {isBusy ? (
                                 <>
                                     <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-white"></div>
                                     Analyzing...
@@ -320,8 +330,8 @@ const Step1RoleAndLocation: React.FC<Step1Props> = ({
             
             {analysisError && <p className="text-center text-sm text-red-600 dark:text-red-400">{analysisError}</p>}
             
-            <LocationDataSummary loading={isAnalyzing} location={formData.location} sunroof={analysisData?.sunroof} eie={analysisData?.eie} hydro={analysisData?.hydro} role={formData.role} />
-            <ReferenceMaps coords={selectedCoords} />
+            <LocationDataSummary loading={isBusy} location={formData.location} sunroof={analysisData?.sunroof} eie={analysisData?.eie} hydro={analysisData?.hydro} role={formData.role} />
+            <ReferenceMaps coords={locationCoords} />
 
             <div className="mt-6 p-4 bg-blue-50 dark:bg-blue-900/30 border-l-4 border-blue-500 rounded-r-lg">
                 <div className="flex">
