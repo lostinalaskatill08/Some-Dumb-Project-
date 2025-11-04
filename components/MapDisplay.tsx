@@ -1,4 +1,3 @@
-
 import React, { useEffect, useRef, useState } from 'react';
 
 declare const L: any; // Standard Leaflet global
@@ -30,6 +29,7 @@ const MapDisplay: React.FC<MapDisplayProps> = ({
 }) => {
   const mapContainerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<any>(null);
+  const drawnItemsRef = useRef<any>(null);
   const [mapStatus, setMapStatus] = useState<'loading' | 'loaded' | 'error'>('loading');
 
   // Use refs for callbacks and props to prevent re-triggering the map initialization effect
@@ -70,6 +70,7 @@ const MapDisplay: React.FC<MapDisplayProps> = ({
 
     const drawnItems = new L.FeatureGroup();
     map.addLayer(drawnItems);
+    drawnItemsRef.current = drawnItems;
 
     const drawControl = new L.Control.Draw({
       edit: {
@@ -89,7 +90,7 @@ const MapDisplay: React.FC<MapDisplayProps> = ({
         },
         circle: false,
         circlemarker: false,
-        marker: true,
+        marker: false, // Set to false to remove the marker tool. Users will double-click.
       },
     });
     map.addControl(drawControl);
@@ -98,13 +99,10 @@ const MapDisplay: React.FC<MapDisplayProps> = ({
       if (disabledRef.current) return;
       const layer = event.layer;
       
-      drawnItems.clearLayers();
-      drawnItems.addLayer(layer);
+      drawnItemsRef.current?.clearLayers();
+      drawnItemsRef.current?.addLayer(layer);
 
-      if (event.layerType === 'marker') {
-        const { lat, lng } = layer.getLatLng();
-        onLocationSelectRef.current(lat, lng);
-      } else if (event.layerType === 'polygon' || event.layerType === 'rectangle') {
+      if (event.layerType === 'polygon' || event.layerType === 'rectangle') {
         const latlngs = event.layerType === 'polygon' ? layer.getLatLngs()[0] : layer.getLatLngs();
         const area = L.GeometryUtil.geodesicArea(latlngs);
         const areaSqFt = area * 10.7639; // Convert sq meters to sq feet
@@ -118,6 +116,20 @@ const MapDisplay: React.FC<MapDisplayProps> = ({
       }
     });
 
+    // Add a double-click event listener to the map for placing a marker.
+    map.on('dblclick', (e: any) => {
+      if (disabledRef.current) return;
+      const { lat, lng } = e.latlng;
+      
+      // Clear any existing drawings/markers
+      drawnItemsRef.current?.clearLayers();
+      // Add a marker at the double-clicked location
+      L.marker([lat, lng]).addTo(drawnItemsRef.current);
+      
+      // Trigger the location selection logic
+      onLocationSelectRef.current(lat, lng);
+    });
+
     return () => {
         if (mapRef.current) {
             mapRef.current.remove();
@@ -126,12 +138,15 @@ const MapDisplay: React.FC<MapDisplayProps> = ({
     };
   }, [mapStatus]);
   
-  // This effect handles panning the map when centerCoords prop changes.
+  // This effect handles panning the map and placing a marker when centerCoords prop changes.
   useEffect(() => {
-    if (mapRef.current && centerCoords) {
+    if (mapRef.current && drawnItemsRef.current && centerCoords) {
       const newLatLng = L.latLng(centerCoords.lat, centerCoords.lon);
       mapRef.current.setView(newLatLng, 16);
-      // You could optionally add a marker here, but the draw control is the primary interaction now.
+      
+      // Add/update a marker at the new center for visual feedback
+      drawnItemsRef.current.clearLayers();
+      L.marker(newLatLng).addTo(drawnItemsRef.current);
     }
   }, [centerCoords]);
 
@@ -168,7 +183,7 @@ const MapDisplay: React.FC<MapDisplayProps> = ({
             </div>
         )}
       </div>
-       <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">Use the toolbar on the map to place a marker for analysis, or draw shapes to measure area.</p>
+       <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">Double-click the map to place a marker for analysis. Use the toolbar to draw shapes and measure area.</p>
     </div>
   );
 };
