@@ -1,6 +1,9 @@
 import { GoogleGenAI, GenerateContentResponse } from "@google/genai";
 import type { FormData, AnalysisContent, SunroofData, EieData, HydroPreAnalysisData, GroundingChunk, UserRole } from '../types';
-import { HydroSourceType } from '../types';
+import { 
+    HydroSourceType, PropertyType, Ownership, RoofType, RoofShape, RoofCondition, 
+    HeatingSystem, CoolingSystem, WaterHeater, DuctworkCondition 
+} from '../types';
 import { KNOWLEDGE_BASE } from './knowledgeBase';
 import { FINANCING_DATA } from './financingData';
 
@@ -300,6 +303,133 @@ const analyzeLocationAndData = async (
 };
 
 /**
+ * Uses Gemini with Google Search to find public data about a property and auto-fill form details.
+ * @param {string} address - The address of the property to research.
+ * @returns {Promise<{updates: Partial<FormData>, autoFilledKeys: (keyof FormData)[]}>} An object with form updates and a list of filled keys.
+ */
+const getPropertyDetailsFromWeb = async (address: string): Promise<{updates: Partial<FormData>, autoFilledKeys: (keyof FormData)[]}> => {
+    const prompt = `
+    You are a property data gatherer for a clean-energy screening app. 
+    Your job is to use public, free sources discoverable via Google Search to 
+    fill as many fields as possible for a single street address: "${address}". 
+    Never use paywalled or login-gated sites. Prefer official sources (County Appraisal District),
+    Google Project Sunroof, OpenEI Utility Rate Database, and public listing pages.
+
+    ALLOWED SOURCES (priority order):
+    1) County Appraisal District (CAD) record for the parcel (e.g., Smith CAD)
+    2) Google Project Sunroof for solar roof metrics
+    3) OpenEI Utility Rate Database (URDB) for electricity rates
+    4) Public listing pages (Zillow, Redfin, Realtor.com) for photos/HVAC/roof
+    5) Google Maps + Street View for visual roof cues and shading context
+    6) USGS StreamStats/NHD for nearby water (hydro screening)
+
+    SEARCH STRATEGY (use Google Search):
+    - First try the CAD:  site:*.org "Appraisal" "Property Search" + "${address}"
+    - If county is known:  site:<COUNTY_SHORT>cad.org "${address}"
+    - Then: Project Sunroof: "${address}" "Project Sunroof"
+    - Then: Public listing pages: "${address}" Zillow | Redfin | Realtor.com
+    - Electric rates: site:openei.org "Utility Rate Database" "<CITY> <STATE>"
+
+    EXTRACTION:
+    Return a single JSON object with this schema. For enum fields, return one of the provided values. Leave fields as null if the information cannot be found.
+    
+    {
+      "property": {
+        "type": "(${Object.values(PropertyType).join(' | ')}) or null",
+        "ownership": "(${Object.values(Ownership).join(' | ')}) or null",
+        "age_years": null,
+        "size_sqft": null,
+        "stories": null
+      },
+      "energy": {
+        "utility_provider": null,
+        "solar_savings_year_usd": null
+      },
+      "roof_site": {
+        "material": "(${Object.values(RoofType).join(' | ')}) or null",
+        "shape": "(${Object.values(RoofShape).join(' | ')}) or null",
+        "condition": "(${Object.values(RoofCondition).join(' | ')}) or null",
+        "pitch_degrees": null,
+        "azimuth_degrees": null,
+        "usable_roof_area_sqft": null,
+        "pv_size_kw": null,
+        "avg_annual_shading_pct": null,
+        "yard_area_sqft": null
+      },
+      "hvac_water": {
+        "primary_heating": "(${Object.values(HeatingSystem).join(' | ')}) or null",
+        "cooling": "(${Object.values(CoolingSystem).join(' | ')}) or null",
+        "water_heater": "(${Object.values(WaterHeater).join(' | ')}) or null",
+        "ductwork_condition": "(${Object.values(DuctworkCondition).join(' | ')}) or null"
+      }
+    }
+
+    RULES:
+    - If multiple sources disagree, prefer CAD > Project Sunroof > URDB > public listings.
+    - If a value is inferred (e.g., roof material from Street View), use it but note the lower confidence.
+    - Do NOT hallucinate. If unknown, return null.
+    - For TX addresses, treat county CAD as authoritative for year built, SQFT, and stories.
+    `;
+
+    const response = await runQuery(prompt, MODEL_PRO, true);
+    const rawJson = extractJsonFromText<any>(response.text);
+
+    if (!rawJson) {
+        console.error("Could not extract JSON from property details response", response.text);
+        throw new Error("The AI was unable to find structured property data for this address.");
+    }
+    
+    const updates: Partial<FormData> = {};
+    const autoFilledKeys: (keyof FormData)[] = [];
+
+    const mapField = (key: keyof FormData, value: any) => {
+        if (value !== null && value !== undefined && String(value).trim() !== '') {
+            // FIX: Cast the value to 'any' to prevent a TypeScript error. The type of `updates[key]`
+            // is a union of all possible property types in `FormData`, which can resolve to `never`
+            // during assignment. This is safe here because this helper is only used for keys that
+            // correspond to string or enum properties.
+            updates[key] = String(value) as any;
+            autoFilledKeys.push(key);
+        }
+    };
+    
+    // Mapping from rawJson to FormData structure
+    if (rawJson.property) {
+        mapField('propertyType', rawJson.property.type);
+        mapField('ownership', rawJson.property.ownership);
+        if (rawJson.property.age_years) {
+            updates.propertyAge = String(new Date().getFullYear() - Number(rawJson.property.age_years));
+             autoFilledKeys.push('propertyAge');
+        }
+        mapField('squareFootage', rawJson.property.size_sqft);
+        mapField('stories', rawJson.property.stories);
+    }
+    if (rawJson.energy) {
+        mapField('utilityProvider', rawJson.energy.utility_provider);
+        mapField('estimatedYearlySavings', rawJson.energy.solar_savings_year_usd);
+    }
+    if (rawJson.roof_site) {
+        mapField('roofType', rawJson.roof_site.material);
+        mapField('roofShape', rawJson.roof_site.shape);
+        mapField('roofCondition', rawJson.roof_site.condition);
+        mapField('roofPitch', rawJson.roof_site.pitch_degrees);
+        mapField('roofAzimuth', rawJson.roof_site.azimuth_degrees);
+        mapField('usableRoofArea', rawJson.roof_site.usable_roof_area_sqft);
+        mapField('solarSystemSizeKw', rawJson.roof_site.pv_size_kw);
+        mapField('shading', rawJson.roof_site.avg_annual_shading_pct);
+        mapField('yardSize', rawJson.roof_site.yard_area_sqft);
+    }
+    if (rawJson.hvac_water) {
+        mapField('heatingSystem', rawJson.hvac_water.primary_heating);
+        mapField('coolingSystem', rawJson.hvac_water.cooling);
+        mapField('waterHeater', rawJson.hvac_water.water_heater);
+        mapField('ductworkCondition', rawJson.hvac_water.ductwork_condition);
+    }
+
+    return { updates, autoFilledKeys };
+};
+
+/**
  * Generates a guide on permitting, regulations, and incentives for a green energy project at a specific location.
  * @param {FormData} formData - The current application form data.
  * @returns {Promise<AnalysisContent>} A promise resolving to the permitting analysis content.
@@ -516,6 +646,7 @@ export const geminiService = {
     geocodeAddress,
     reverseGeocode,
     analyzeLocationAndData,
+    getPropertyDetailsFromWeb,
     getPermittingAnalysis,
     generateAnalysisContext,
     getEnergyAudit,

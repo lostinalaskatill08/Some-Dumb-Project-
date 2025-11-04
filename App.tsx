@@ -1,6 +1,7 @@
 
 
 
+
 import React, { useState, useCallback, useMemo, useEffect, useRef } from 'react';
 import type { FormData, AnalysisResults, LoadingStates, AnalysisKey, SalesAnalysisKey, AnalysisContent, Project, Run, FormErrors } from './types';
 // FIX: Removed unused and undefined type imports LeedCertification, HVACSystem, and RoofType.
@@ -198,6 +199,8 @@ const App: React.FC = () => {
   const [error, setError] = useState<string | null>(null);
   /** State for storing form validation errors. */
   const [errors, setErrors] = useState<FormErrors>({});
+  /** State for when the app is fetching public property data. */
+  const [isGatheringDetails, setIsGatheringDetails] = useState(false);
 
   /** State for the current step in the multi-step form. */
   const [currentStep, setCurrentStep] = useState(1);
@@ -572,8 +575,23 @@ setError(e instanceof Error ? e.message : 'An unknown error occurred during sale
   /**
    * Handles advancing to the next step, validating the form and triggering the relevant analysis.
    */
-  const handleNext = useCallback(() => {
+  const handleNext = useCallback(async () => {
     if (!validateForm()) return;
+
+    // Special handling for advancing from Step 1 in the regular flow
+    if (currentStep === 1 && !isSalesFlow) {
+        setIsGatheringDetails(true);
+        setError(null);
+        try {
+            const { updates, autoFilledKeys } = await geminiService.getPropertyDetailsFromWeb(formData.location);
+            handleBulkDataChange(updates, autoFilledKeys);
+        } catch (e) {
+            console.error("Failed to auto-fill details:", e);
+            setError("Could not automatically fetch all property details. Please review and enter any missing information manually.");
+        } finally {
+            setIsGatheringDetails(false);
+        }
+    }
 
     const nextStep = currentStep + 1;
     if (isSalesFlow) {
@@ -590,7 +608,7 @@ setError(e instanceof Error ? e.message : 'An unknown error occurred during sale
     if (currentStep < currentFlowSteps.length) {
       setCurrentStep(nextStep);
     }
-  }, [currentStep, formData, isSalesFlow, runPermittingAnalysis, runRegularAnalysis, runSalesAnalysis, runSummary, runFinancing, runFinalReport, currentFlowSteps.length]);
+  }, [currentStep, formData, isSalesFlow, runPermittingAnalysis, runRegularAnalysis, runSalesAnalysis, runSummary, runFinancing, runFinalReport, currentFlowSteps.length, handleBulkDataChange]);
   
   /**
    * Handles returning to the previous step.
@@ -621,7 +639,13 @@ setError(e instanceof Error ? e.message : 'An unknown error occurred during sale
       setIsConversationOpen(true);
   };
   
-  const isAnalyzing = Object.values(loadingStates).some(Boolean);
+  const isAnalyzing = Object.values(loadingStates).some(Boolean) || isGatheringDetails;
+  
+  const getNextButtonText = () => {
+      if (isGatheringDetails) return 'Gathering Details...';
+      if (isAnalyzing) return 'Analyzing...';
+      return 'Next';
+  };
 
   const renderCurrentStep = () => {
     const stepComponentMap = [
@@ -747,7 +771,7 @@ setError(e instanceof Error ? e.message : 'An unknown error occurred during sale
                   disabled={isAnalyzing}
                   className="px-6 py-3 font-bold text-white bg-green-600 rounded-lg shadow-md hover:bg-green-700 transition-colors focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500 disabled:bg-slate-400 dark:disabled:bg-slate-600 disabled:cursor-not-allowed"
                 >
-                  {isAnalyzing ? 'Analyzing...' : 'Next'}
+                  {getNextButtonText()}
                 </button>
               )}
             </footer>
