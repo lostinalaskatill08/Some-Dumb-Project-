@@ -225,7 +225,14 @@ const reverseGeocode = async (lat: number, lon: number): Promise<string | null> 
  * @returns A promise resolving to the parsed SunroofData or null.
  */
 const getSolarApiData = async (lat: number, lon: number): Promise<Partial<FormData> | null> => {
-    const url = `https://solar.googleapis.com/v1/buildingInsights:findClosest?location.latitude=${lat}&location.longitude=${lon}&requiredQuality=HIGH&key=${process.env.API_KEY}`;
+    const apiKey = process.env.SOLAR_API_KEY || process.env.API_KEY;
+
+    if (!apiKey) {
+        console.error("Solar API call failed: No API key found. Please set the SOLAR_API_KEY or API_KEY environment variable.");
+        return null;
+    }
+
+    const url = `https://solar.googleapis.com/v1/buildingInsights:findClosest?location.latitude=${lat}&location.longitude=${lon}&requiredQuality=HIGH&key=${apiKey}`;
 
     try {
         const res = await fetchWithTimeout(url);
@@ -293,7 +300,7 @@ const getPropertyDetailsFromWeb = async (address: string, existingData: Partial<
 
     **Search for these missing fields:**
     - Property Type (e.g., Single-family)
-    - Property Age (Year Built)
+    - Year Built
     - Square Footage (Living Area)
     - Number of Stories
     - Roof Material (e.g., Asphalt Shingle)
@@ -310,7 +317,7 @@ const getPropertyDetailsFromWeb = async (address: string, existingData: Partial<
     {
       "property": {
         "type": "(${Object.values(PropertyType).join(' | ')}) or null",
-        "age_years": null,
+        "year_built": 1998 or null,
         "size_sqft": null,
         "stories": null
       },
@@ -324,7 +331,7 @@ const getPropertyDetailsFromWeb = async (address: string, existingData: Partial<
     }
 
     RULES:
-    - Prefer CAD records for age, sqft, and stories.
+    - Prefer CAD records for year_built, sqft, and stories.
     - Do NOT hallucinate. If unknown, return null.
     `;
 
@@ -351,8 +358,9 @@ const getPropertyDetailsFromWeb = async (address: string, existingData: Partial<
     
     if (rawJson.property) {
         mapField('propertyType', rawJson.property.type);
-        if (rawJson.property.age_years) {
-            updates.propertyAge = String(new Date().getFullYear() - Number(rawJson.property.age_years));
+        const yearBuilt = rawJson.property.year_built;
+        if (yearBuilt && !isNaN(Number(yearBuilt)) && Number(yearBuilt) > 1800 && Number(yearBuilt) <= new Date().getFullYear()) {
+             updates.propertyAge = String(new Date().getFullYear() - Number(yearBuilt));
              autoFilledKeys.push('propertyAge');
         }
         mapField('squareFootage', rawJson.property.size_sqft);
