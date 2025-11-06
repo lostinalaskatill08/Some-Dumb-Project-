@@ -55,14 +55,16 @@ const LocationDataSummary: React.FC<LocationDataSummaryProps> = ({ loading, loca
               <div>
                 <div className="flex items-center gap-2 mb-3">
                     <SunIcon className="w-6 h-6 text-orange-500" />
-                    <h4 className="font-semibold text-slate-700 dark:text-slate-300">Project Sunroof Insights</h4>
+                    <h4 className="font-semibold text-slate-700 dark:text-slate-300">Google Solar API Insights</h4>
                 </div>
                 <dl>
-                  <DataRow label="Usable Sunlight Hours" value={sunroof.usableSunlightHours} />
-                  <DataRow label="Usable Roof Area" value={sunroof.usableRoofArea} />
-                  <DataRow label="Potential System Size" value={sunroof.potentialSystemSizeKw} />
-                  <DataRow label="Estimated Roof Pitch" value={sunroof.roofPitch} />
-                  <DataRow label="Potential Yearly Savings" value={sunroof.potentialYearlySavings} />
+                  <DataRow label="Usable Sunlight Hours" value={sunroof.usableSunlightHours ? `${parseFloat(sunroof.usableSunlightHours).toLocaleString(undefined, {maximumFractionDigits: 0})} hrs/yr` : null} />
+                  <DataRow label="Usable Roof Area" value={sunroof.usableRoofArea ? `${parseFloat(sunroof.usableRoofArea).toLocaleString(undefined, {maximumFractionDigits: 0})} sq ft` : null} />
+                  <DataRow label="Potential System Size" value={sunroof.potentialSystemSizeKw ? `${parseFloat(sunroof.potentialSystemSizeKw).toFixed(2)} kW` : null} />
+                  <DataRow label="Est. Annual Production" value={sunroof.yearlyProductionDcKwh ? `${parseFloat(sunroof.yearlyProductionDcKwh).toLocaleString(undefined, {maximumFractionDigits: 0})} kWh` : null} />
+                  <DataRow label="Estimated Roof Pitch" value={sunroof.roofPitch ? `${parseFloat(sunroof.roofPitch).toFixed(1)}°` : null} />
+                  <DataRow label="Estimated Monthly Bill" value={sunroof.monthlyBill ? `$${parseFloat(sunroof.monthlyBill).toFixed(2)}` : null} />
+                  <DataRow label="Est. Savings Over 20 Years" value={sunroof.savingsOver20Years ? `$${parseFloat(sunroof.savingsOver20Years).toLocaleString(undefined, {maximumFractionDigits: 0})}` : null} />
                 </dl>
                  <p className="text-xs text-slate-500 dark:text-slate-400 mt-3 italic">{sunroof.rawText}</p>
               </div>

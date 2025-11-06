@@ -12,15 +12,6 @@ const ai = new GoogleGenAI({ apiKey: process.env.API_KEY! });
 const MODEL_FLASH = 'gemini-2.5-flash';
 const MODEL_PRO = 'gemini-2.5-pro';
 
-// Custom type for the structured response from the new analysis function
-interface LocationAnalysisResponse {
-    location: string;
-    sunroofData: SunroofData | null;
-    eieData: EieData | null;
-    hydroPreAnalysisData: HydroPreAnalysisData | null;
-    coordinates?: { lat: number; lon: number };
-}
-
 /**
  * A wrapper for the native fetch API that adds a timeout.
  * @param {RequestInfo} resource - The resource to fetch.
@@ -29,7 +20,7 @@ interface LocationAnalysisResponse {
  * @throws An error if the request times out or fails for other reasons.
  */
 const fetchWithTimeout = async (resource: RequestInfo, options: RequestInit & { timeout?: number } = {}) => {
-  const { timeout = 10000 } = options; // Default 10-second timeout
+  const { timeout = 15000 } = options; // Default 15-second timeout
 
   const controller = new AbortController();
   const id = setTimeout(() => controller.abort(), timeout);
@@ -98,7 +89,7 @@ const generateAnalysisContext = (formData: FormData, permittingText: string): st
     
     context += `\n--- PRELIMINARY LOCATION ANALYSIS ---\n`;
     if (formData.sunroofData && formData.sunroofData.rawText) {
-        context += `Sunroof/Solar Estimate Summary: ${formData.sunroofData.rawText}\n`;
+        context += `Google Solar API Summary: Usable roof area ${formData.sunroofData.usableRoofArea} sq ft, potential size ${formData.sunroofData.potentialSystemSizeKw} kW, producing ${formData.sunroofData.yearlyProductionDcKwh} kWh/yr.\n`;
     }
     if (formData.eieData && formData.eieData.rawText) {
         context += `Environmental Insights Summary: ${formData.eieData.rawText}\n`;
@@ -228,147 +219,113 @@ const reverseGeocode = async (lat: number, lon: number): Promise<string | null> 
 };
 
 /**
- * Performs a comprehensive AI analysis of a specific location, optionally enhanced with user-provided text or images.
- * It fetches data for Project Sunroof, Environmental Insights Explorer, and Hydropower potential.
- * @param {number} lat - The latitude of the location.
- * @param {number} lon - The longitude of the location.
- * @param {string} address - The confirmed address of the location.
- * @param {string} [pastedText] - Optional user-pasted text (e.g., from a utility bill).
- * @returns {Promise<LocationAnalysisResponse | null>} A promise resolving to the structured analysis data.
- * @throws An error if the API call fails.
+ * Fetches solar data for a given location using the Google Solar API.
+ * @param lat Latitude of the location.
+ * @param lon Longitude of the location.
+ * @returns A promise resolving to the parsed SunroofData or null.
  */
-const analyzeLocationAndData = async (
-    lat: number, 
-    lon: number,
-    address: string,
-    pastedText?: string
-): Promise<LocationAnalysisResponse | null> => {
-
-    const prompt = `
-        You are an AI assistant specializing in green energy analysis. Your task is to parse user-provided text, which is likely from Google's Project Sunroof or a similar solar calculator, and extract specific data points.
-
-        **Primary Location Context (for reference only):**
-        - Address: ${address}
-
-        **User-provided Text to Analyze:**
-        ---
-        ${pastedText || "No text provided."}
-        ---
-
-        **CRITICAL Instructions:**
-        1.  **Parse the Text:** Read the "User-provided Text" above and extract values for the fields in the JSON structure below.
-        2.  **Extract, Don't Invent:** Your primary goal is to find values *within the text*. If a specific value (like "roofPitch") is not mentioned in the text, you MUST return \`null\` for that field. Do not estimate or guess values.
-        3.  **Strict JSON Output:** Return ONLY a single, valid JSON object matching the structure below. Do not include any conversational text, markdown formatting like \`\`\`json, or any other characters outside the JSON object itself.
-        4.  **Location Field:** The 'location' field in your JSON output MUST be exactly "${address}".
-
-        **Required JSON Output Structure:**
-        \`\`\`json
-        {
-          "location": "${address}",
-          "sunroofData": {
-            "usableSunlightHours": "...",
-            "usableRoofArea": "...",
-            "potentialSystemSizeKw": "...",
-            "potentialYearlySavings": "...",
-            "roofPitch": "...",
-            "rawText": "Brief summary of data source, e.g., 'Data extracted from user-provided text.'"
-          },
-          "eieData": null,
-          "hydroPreAnalysisData": null,
-          "coordinates": {
-            "lat": ${lat},
-            "lon": ${lon}
-          }
-        }
-        \`\`\`
-        `;
-    
-    const promptParts: any[] = [{ text: prompt }];
+const getSolarApiData = async (lat: number, lon: number): Promise<Partial<FormData> | null> => {
+    const url = `https://solar.googleapis.com/v1/buildingInsights:findClosest?location.latitude=${lat}&location.longitude=${lon}&requiredQuality=HIGH&key=${process.env.API_KEY}`;
 
     try {
-        const response: GenerateContentResponse = await ai.models.generateContent({
-            model: MODEL_PRO, // Use Pro for this parsing task
-            contents: { parts: promptParts },
-        });
-
-        const text = response.text;
-        return extractJsonFromText<LocationAnalysisResponse>(text);
-    } catch (e) {
-        console.error(`Error running location analysis:`, e);
-        if (e instanceof Error) {
-           throw new Error(`Failed to get response from Gemini API: ${e.message}`);
+        const res = await fetchWithTimeout(url);
+        if (!res.ok) {
+            if (res.status === 404) {
+                 console.warn(`Solar API: No data found for location ${lat}, ${lon}.`);
+                 return null;
+            }
+            throw new Error(`Google Solar API failed with status ${res.status}: ${await res.text()}`);
         }
-        throw new Error('An unknown error occurred while querying the Gemini API.');
+        const data = await res.json();
+        
+        if (!data.solarPotential) {
+            return null; // No solar potential found.
+        }
+
+        const { solarPotential, financialAnalyses, solarPanelConfigs } = data;
+        const bestConfig = solarPanelConfigs?.[0];
+        const bestFinancial = financialAnalyses?.[0];
+
+        const sunroofData: SunroofData = {
+            usableSunlightHours: solarPotential.maxSunshineHoursPerYear?.toFixed(0) || null,
+            usableRoofArea: solarPotential.maxArrayAreaMeters2 ? (solarPotential.maxArrayAreaMeters2 * 10.764).toFixed(0) : null,
+            potentialSystemSizeKw: bestConfig?.panelsCount ? (bestConfig.panelsCount * solarPotential.panelCapacityWatts / 1000).toFixed(2) : null,
+            savingsOver20Years: bestFinancial?.savingsOver20Years?.units?.toFixed(0) || null,
+            yearlyProductionDcKwh: bestConfig?.yearlyEnergyDcKwh?.toFixed(0) || null,
+            monthlyBill: bestFinancial?.monthlyBill?.units?.toFixed(0) || null,
+            roofPitch: solarPotential.roofSegmentStats?.[0]?.pitchDegrees?.toFixed(1) || null,
+            rawText: "Data from Google Solar API."
+        };
+        
+        const updates: Partial<FormData> = { sunroofData };
+        if (sunroofData.usableRoofArea) updates.usableRoofArea = sunroofData.usableRoofArea;
+        if (sunroofData.potentialSystemSizeKw) updates.solarSystemSizeKw = sunroofData.potentialSystemSizeKw;
+        if (sunroofData.roofPitch) updates.roofPitch = sunroofData.roofPitch;
+        if (sunroofData.monthlyBill) updates.electricityBill = sunroofData.monthlyBill;
+
+        return updates;
+
+    } catch (error) {
+        console.error("Error fetching from Google Solar API:", error);
+        // Don't rethrow, just return null so the app can proceed gracefully.
+        return null; 
     }
 };
+
 
 /**
  * Uses Gemini with Google Search to find public data about a property and auto-fill form details.
  * @param {string} address - The address of the property to research.
  * @returns {Promise<{updates: Partial<FormData>, autoFilledKeys: (keyof FormData)[]}>} An object with form updates and a list of filled keys.
  */
-const getPropertyDetailsFromWeb = async (address: string): Promise<{updates: Partial<FormData>, autoFilledKeys: (keyof FormData)[]}> => {
+const getPropertyDetailsFromWeb = async (address: string, existingData: Partial<FormData>): Promise<{updates: Partial<FormData>, autoFilledKeys: (keyof FormData)[]}> => {
     const prompt = `
     You are a property data gatherer for a clean-energy screening app. 
     Your job is to use public, free sources discoverable via Google Search to 
-    fill as many fields as possible for a single street address: "${address}". 
-    Never use paywalled or login-gated sites. Prefer official sources (County Appraisal District),
-    Google Project Sunroof, OpenEI Utility Rate Database, and public listing pages.
+    fill as many fields as possible for a single street address: "${address}".
+    Some data has already been populated from other APIs. Your task is to find what's missing.
 
-    ALLOWED SOURCES (priority order):
-    1) County Appraisal District (CAD) record for the parcel (e.g., Smith CAD)
-    2) Google Project Sunroof for solar roof metrics
-    3) OpenEI Utility Rate Database (URDB) for electricity rates
-    4) Public listing pages (Zillow, Redfin, Realtor.com) for photos/HVAC/roof
-    5) Google Maps + Street View for visual roof cues and shading context
-    6) USGS StreamStats/NHD for nearby water (hydro screening)
+    **Existing Data (DO NOT OVERWRITE):**
+    - Usable Roof Area: ${existingData.usableRoofArea || 'Unknown'}
+    - Potential Solar kW: ${existingData.solarSystemSizeKw || 'Unknown'}
+    - Roof Pitch: ${existingData.roofPitch || 'Unknown'}
+    - Monthly Bill: ${existingData.electricityBill || 'Unknown'}
 
-    SEARCH STRATEGY (use Google Search):
-    - First try the CAD:  site:*.org "Appraisal" "Property Search" + "${address}"
-    - If county is known:  site:<COUNTY_SHORT>cad.org "${address}"
-    - Then: Project Sunroof: "${address}" "Project Sunroof"
-    - Then: Public listing pages: "${address}" Zillow | Redfin | Realtor.com
-    - Electric rates: site:openei.org "Utility Rate Database" "<CITY> <STATE>"
+    **Search for these missing fields:**
+    - Property Type (e.g., Single-family)
+    - Property Age (Year Built)
+    - Square Footage (Living Area)
+    - Number of Stories
+    - Roof Material (e.g., Asphalt Shingle)
+    - Primary Heating System (e.g., Gas furnace)
+    - Cooling System (e.g., Central AC)
 
-    EXTRACTION:
-    Return a single JSON object with this schema. For enum fields, return one of the provided values. Leave fields as null if the information cannot be found.
+    **ALLOWED SOURCES (priority order):**
+    1) County Appraisal District (CAD) record for the parcel.
+    2) Public real estate listing pages (Zillow, Redfin, Realtor.com).
+    3) Google Maps + Street View for visual roof material cues.
+
+    **Return a single JSON object with this schema. Leave fields as null if the information cannot be found.**
     
     {
       "property": {
         "type": "(${Object.values(PropertyType).join(' | ')}) or null",
-        "ownership": "(${Object.values(Ownership).join(' | ')}) or null",
         "age_years": null,
         "size_sqft": null,
         "stories": null
       },
-      "energy": {
-        "utility_provider": null,
-        "solar_savings_year_usd": null
-      },
       "roof_site": {
-        "material": "(${Object.values(RoofType).join(' | ')}) or null",
-        "shape": "(${Object.values(RoofShape).join(' | ')}) or null",
-        "condition": "(${Object.values(RoofCondition).join(' | ')}) or null",
-        "pitch_degrees": null,
-        "azimuth_degrees": null,
-        "usable_roof_area_sqft": null,
-        "pv_size_kw": null,
-        "avg_annual_shading_pct": null,
-        "yard_area_sqft": null
+        "material": "(${Object.values(RoofType).join(' | ')}) or null"
       },
       "hvac_water": {
         "primary_heating": "(${Object.values(HeatingSystem).join(' | ')}) or null",
-        "cooling": "(${Object.values(CoolingSystem).join(' | ')}) or null",
-        "water_heater": "(${Object.values(WaterHeater).join(' | ')}) or null",
-        "ductwork_condition": "(${Object.values(DuctworkCondition).join(' | ')}) or null"
+        "cooling": "(${Object.values(CoolingSystem).join(' | ')}) or null"
       }
     }
 
     RULES:
-    - If multiple sources disagree, prefer CAD > Project Sunroof > URDB > public listings.
-    - If a value is inferred (e.g., roof material from Street View), use it but note the lower confidence.
+    - Prefer CAD records for age, sqft, and stories.
     - Do NOT hallucinate. If unknown, return null.
-    - For TX addresses, treat county CAD as authoritative for year built, SQFT, and stories.
     `;
 
     const response = await runQuery(prompt, MODEL_PRO, true);
@@ -384,19 +341,16 @@ const getPropertyDetailsFromWeb = async (address: string): Promise<{updates: Par
 
     const mapField = (key: keyof FormData, value: any) => {
         if (value !== null && value !== undefined && String(value).trim() !== '') {
-            // FIX: Cast the value to 'any' to prevent a TypeScript error. The type of `updates[key]`
-            // is a union of all possible property types in `FormData`, which can resolve to `never`
-            // during assignment. This is safe here because this helper is only used for keys that
-            // correspond to string or enum properties.
-            updates[key] = String(value) as any;
+            // FIX: Cast `updates` to `any` to bypass TypeScript's overly strict indexed access type checking.
+            // This is a safe operation because we are only calling this function with keys
+            // that correspond to string or enum properties in the FormData interface.
+            (updates as any)[key] = String(value);
             autoFilledKeys.push(key);
         }
     };
     
-    // Mapping from rawJson to FormData structure
     if (rawJson.property) {
         mapField('propertyType', rawJson.property.type);
-        mapField('ownership', rawJson.property.ownership);
         if (rawJson.property.age_years) {
             updates.propertyAge = String(new Date().getFullYear() - Number(rawJson.property.age_years));
              autoFilledKeys.push('propertyAge');
@@ -404,30 +358,48 @@ const getPropertyDetailsFromWeb = async (address: string): Promise<{updates: Par
         mapField('squareFootage', rawJson.property.size_sqft);
         mapField('stories', rawJson.property.stories);
     }
-    if (rawJson.energy) {
-        mapField('utilityProvider', rawJson.energy.utility_provider);
-        mapField('estimatedYearlySavings', rawJson.energy.solar_savings_year_usd);
-    }
     if (rawJson.roof_site) {
         mapField('roofType', rawJson.roof_site.material);
-        mapField('roofShape', rawJson.roof_site.shape);
-        mapField('roofCondition', rawJson.roof_site.condition);
-        mapField('roofPitch', rawJson.roof_site.pitch_degrees);
-        mapField('roofAzimuth', rawJson.roof_site.azimuth_degrees);
-        mapField('usableRoofArea', rawJson.roof_site.usable_roof_area_sqft);
-        mapField('solarSystemSizeKw', rawJson.roof_site.pv_size_kw);
-        mapField('shading', rawJson.roof_site.avg_annual_shading_pct);
-        mapField('yardSize', rawJson.roof_site.yard_area_sqft);
     }
     if (rawJson.hvac_water) {
         mapField('heatingSystem', rawJson.hvac_water.primary_heating);
         mapField('coolingSystem', rawJson.hvac_water.cooling);
-        mapField('waterHeater', rawJson.hvac_water.water_heater);
-        mapField('ductworkCondition', rawJson.hvac_water.ductwork_condition);
     }
 
     return { updates, autoFilledKeys };
 };
+
+/**
+ * Orchestrates the full location analysis pipeline: Solar API call followed by AI web search for augmentation.
+ * @param lat Latitude of the location.
+ * @param lon Longitude of the location.
+ * @param address The string address for the location.
+ * @returns An object with form updates and a list of filled keys.
+ */
+const analyzeLocation = async (lat: number, lon: number, address: string): Promise<{updates: Partial<FormData>, autoFilledKeys: (keyof FormData)[]}> => {
+    let allUpdates: Partial<FormData> = {};
+    let allAutoFilledKeys: (keyof FormData)[] = [];
+
+    // 1. Get data from Google Solar API
+    const solarUpdates = await getSolarApiData(lat, lon);
+    if (solarUpdates) {
+        allUpdates = { ...allUpdates, ...solarUpdates };
+        allAutoFilledKeys.push(...Object.keys(solarUpdates) as (keyof FormData)[]);
+    }
+
+    // 2. Augment with public records search via AI
+    try {
+        const webDetails = await getPropertyDetailsFromWeb(address, allUpdates);
+        allUpdates = { ...allUpdates, ...webDetails.updates };
+        allAutoFilledKeys.push(...webDetails.autoFilledKeys);
+    } catch (e) {
+        console.warn("AI web search for property details failed, proceeding with Solar API data only.", e);
+        // Don't throw, allow the process to continue with whatever data we have.
+    }
+    
+    return { updates: allUpdates, autoFilledKeys: [...new Set(allAutoFilledKeys)] };
+};
+
 
 /**
  * Generates a guide on permitting, regulations, and incentives for a green energy project at a specific location.
@@ -435,12 +407,12 @@ const getPropertyDetailsFromWeb = async (address: string): Promise<{updates: Par
  * @returns {Promise<AnalysisContent>} A promise resolving to the permitting analysis content.
  */
 const getPermittingAnalysis = async (formData: FormData): Promise<AnalysisContent> => {
-    const prompt = `Generate a permitting and incentives guide for a green energy project in "${formData.location}". My role is "${formData.role}". The project involves technologies like solar, wind, and battery storage. Focus on:
-1.  **Key Local Authorities:** Identify the city/county/state agencies responsible for building permits, electrical permits, and environmental reviews.
-2.  **Major Permits Required:** List the likely permits (e.g., building, electrical, zoning variance).
-3.  **Local/State Incentives:** Find specific rebates, tax credits, or grants available in this area for my role. Use Google Search for the most current information.
-4.  **Utility Interconnection:** Briefly describe the process and key contact for the local utility provider (${formData.utilityProvider || 'local utility'}).
-Format the response clearly with markdown headings.`;
+    const prompt = `Generate a permitting and incentives guide for a green energy project in "${formData.location}". My role is "${formData.role}". The project involves technologies like solar, wind, and battery storage. Use Google Search for the most current information. Focus on:
+1.  **Key Local Authorities:** Identify the specific city/county/state agencies responsible for building permits, electrical permits, and environmental reviews for this address.
+2.  **Major Permits Required:** List the likely permits (e.g., building, electrical, zoning variance) with links to the official application pages if possible.
+3.  **Utility Interconnection:** Describe the interconnection process and provide a link to the application page for the local utility provider (${formData.utilityProvider || 'the local utility'}).
+4.  **Key Local Codes:** Mention any specific local amendments or codes relevant to solar/wind installations (e.g., setback requirements, height restrictions).
+Format the response clearly with markdown headings and provide citations to official government or utility websites.`;
     return runQuery(prompt, MODEL_PRO, true);
 };
 
@@ -456,19 +428,34 @@ const getEnergyAudit = (analysisContext: string, role: UserRole | null) => runQu
  * Analyzes the solar energy potential for the given context, tailored to the user's role.
  * @param {string} analysisContext - The full analysis context string.
  * @param {UserRole | null} role - The user's selected role.
+ * @param {SunroofData | null | undefined} sunroofData - Pre-fetched data from the Google Solar API.
  * @returns {Promise<AnalysisContent>} The solar analysis results.
  */
-const getSolarAnalysis = (analysisContext: string, role: UserRole | null) => runQuery(`As a solar analyst, analyze the solar potential using the full context provided.
-Your analysis MUST be tailored to the user's role: **${role}**.
-- If 'Homeowner': Focus on system size (kW), cost, annual savings ($), and payback for a single rooftop.
-- If 'Community Organizer': Focus on aggregate potential, community solar models, and local job creation.
-- If 'Policymaker': Focus on regional capacity (MW), land use, grid impact, and policy recommendations.
-- If 'Developer': Focus on new construction/retrofit integration, ROI for multi-unit buildings.
+const getSolarAnalysis = (analysisContext: string, role: UserRole | null, sunroofData: SunroofData | null | undefined) => {
+    const solarApiContext = sunroofData 
+        ? `This location has been analyzed with the Google Solar API. Key findings:
+- Usable Roof Area: ${sunroofData.usableRoofArea || 'N/A'} sq ft
+- Recommended System Size: ${sunroofData.potentialSystemSizeKw || 'N/A'} kW
+- Estimated Annual Production: ${sunroofData.yearlyProductionDcKwh || 'N/A'} kWh (DC)
+- Estimated 20-Year Savings: $${sunroofData.savingsOver20Years || 'N/A'}`
+        : "No specific Google Solar API data is available for this location.";
 
-**Task:** Calculate the estimated system size, annual energy production in kWh, and estimated cost. Summarize pros and cons for this user.
-Use these constants for calculation: ${JSON.stringify(KNOWLEDGE_BASE.calculators.solar)}
+    const prompt = `As a solar analyst, create a narrative analysis of the solar potential using the full context below.
+**Your analysis MUST be tailored to the user's role: ${role}**.
+- If 'Homeowner': Focus on interpreting the system size, cost, annual savings ($), and payback period. Explain what the numbers mean for their household.
+- If 'Community Organizer': Discuss the aggregate potential if multiple homes adopted similar systems. Mention community solar models and local job creation.
+- If 'Policymaker': Analyze the regional capacity impact, land use implications, and how these findings could inform policy.
+- If 'Developer': Focus on ROI, integration into new construction/retrofits, and potential for multi-unit applications.
 
-**Full Context:**\n${analysisContext}`);
+**Task:** Write a clear, narrative summary based on the provided data. If Solar API data is available, use it as the primary source for your quantitative statements. If not, use the general property details to make a high-level qualitative assessment. Conclude with pros and cons.
+
+**Google Solar API Data:**
+${solarApiContext}
+
+**Full User & Property Context:**\n${analysisContext}`;
+
+    return runQuery(prompt);
+};
 
 /**
  * Analyzes the wind energy potential, tailored to the user's role.
@@ -476,14 +463,16 @@ Use these constants for calculation: ${JSON.stringify(KNOWLEDGE_BASE.calculators
  * @param {UserRole | null} role - The user's selected role.
  * @returns {Promise<AnalysisContent>} The wind analysis results.
  */
-const getWindAnalysis = (analysisContext: string, role: UserRole | null) => runQuery(`As a wind energy analyst, analyze the small-scale wind potential. Tailor your response to the user's role: **${role}**.
-- If 'Homeowner': Assess feasibility for a single property based on yard size. Discuss noise and permitting.
-- If 'Community/Policymaker': Discuss distributed wind potential for the region and zoning considerations.
+const getWindAnalysis = (analysisContext: string, role: UserRole | null) => runQuery(`As a wind energy analyst, analyze the small-scale wind potential for the location in the context below.
+**Use Google Search to find authoritative data on average wind speeds for this location (e.g., from NREL wind maps or NOAA). Cite your sources.**
+A general heuristic is that average wind speeds should be at least 10-12 mph (4.5-5.5 m/s) at hub height for a small turbine to be viable.
 
-**Task:** Assess feasibility, estimate annual power output for a small residential turbine, and discuss key considerations.
-Use these constants for calculation: ${JSON.stringify(KNOWLEDGE_BASE.calculators.wind)}
+**Task:**
+1.  Report the average wind speed you found for the area, citing the source.
+2.  Based on the wind speed and property details (like yard size), assess the feasibility for a small residential turbine.
+3.  Discuss key considerations like zoning, noise, and maintenance, tailored to the user's role: **${role}**.
 
-**Full Context:**\n${analysisContext}`);
+**Full Context:**\n${analysisContext}`, MODEL_PRO, true);
 
 /**
  * Analyzes micro-hydropower potential, tailored to the user's role.
@@ -491,11 +480,16 @@ Use these constants for calculation: ${JSON.stringify(KNOWLEDGE_BASE.calculators
  * @param {UserRole | null} role - The user's selected role.
  * @returns {Promise<AnalysisContent>} The hydro analysis results.
  */
-const getHydroAnalysis = (analysisContext: string, role: UserRole | null) => runQuery(`As a hydropower analyst, analyze the micro-hydropower potential based on the provided context. Tailor the analysis for a **${role}**.
-**Task:** Based on any provided hydro details (source type, flow, head), calculate the potential power in Watts and annual energy in kWh. Discuss feasibility, environmental impact, and maintenance.
-Use these constants for calculation: ${JSON.stringify(KNOWLEDGE_BASE.calculators.hydro)}
+const getHydroAnalysis = (analysisContext: string, role: UserRole | null) => runQuery(`As a hydropower analyst, analyze the micro-hydropower potential based on the provided context.
+**Use Google Search to identify any nearby rivers or perennial streams and check USGS streamflow data if available. Cite your sources.** A viable micro-hydro site typically requires year-round flow and at least a few feet of vertical drop (head).
 
-**Full Context:**\n${analysisContext}`);
+**Task:**
+1.  Identify if there are any suitable water resources near the location.
+2.  Based on user-provided data (if any) and your research, assess the feasibility.
+3.  If feasible, calculate the potential power in Watts and annual energy in kWh using the formula: Power (W) ≈ Head (ft) × Flow (GPM) × 0.113.
+4.  Discuss key considerations (permitting, water rights, environmental impact) tailored for a **${role}**.
+
+**Full Context:**\n${analysisContext}`, MODEL_PRO, true);
 
 /**
  * Analyzes battery storage needs based on energy usage and potential renewable generation.
@@ -519,12 +513,15 @@ ${renewableGenerationContext}
  * @returns {Promise<AnalysisContent>} The financing analysis results.
  */
 const getFinancingAnalysis = (analysisContext: string, role: UserRole | null) => runQuery(`As a green energy finance expert, create a financing guide for a "${role}".
-**Task:** Based on the full project context, suggest the top 3-4 most relevant financing options from the provided knowledge base. For each, explain WHY it's a good fit for this user. Use search to find any specific local programs that apply.
+**Task:**
+1.  First, use Google Search to query the DSIRE database (dsireusa.org) for specific, local incentives for the location in the context below. Search for rebates, tax credits, and grants applicable to solar, batteries, and efficiency upgrades.
+2.  Then, review the provided general knowledge base of financing options.
+3.  Combine your findings into a single guide. Suggest the top 3-4 most relevant financing options (from both your search and the knowledge base). For each, explain WHY it's a good fit for this specific user and project. Provide direct links to the program websites.
 
 **Knowledge Base:**
 ${JSON.stringify(FINANCING_DATA)}
 
-**Full Context:**\n${analysisContext}`);
+**Full Context:**\n${analysisContext}`, MODEL_PRO, true);
 
 /**
  * Synthesizes all individual analyses into a concise executive summary and action plan.
@@ -549,30 +546,32 @@ ${analysisContext}`);
  * Generates the final report, focusing on financial ROI and environmental impact calculations.
  * @param {string} analysisContext - The user and project context.
  * @param {string} fullAnalysisText - The combined text from all previous analysis steps.
+ * @param {SunroofData | null | undefined} sunroofData - Pre-fetched data from the Google Solar API.
  * @returns {Promise<AnalysisContent>} The final report content.
  */
-const getFinalReport = (analysisContext: string, fullAnalysisText: string) => {
+const getFinalReport = (analysisContext: string, fullAnalysisText: string, sunroofData: SunroofData | null | undefined) => {
     const prompt = `
     Generate a final report synthesizing the financial and environmental impact of the recommended green energy project.
     **Analysis Summary:**
     ${fullAnalysisText}
 
-    **Knowledge Base:**
+    **Knowledge Base & Formulas:**
     - Avg. Electricity Cost: $${KNOWLEDGE_BASE.financial.avgElectricityCost}/kWh
-    - Solar Cost: $${KNOWLEDGE_BASE.financial.costPerWatt}/W
+    - Solar Cost: $${KNOWLEDGE_BASE.financial.costPerWatt.solar}/W (use for estimation if API data is missing)
     - Grid CO2 Factor: ${KNOWLEDGE_BASE.environmental.gridCo2Factor} lbs CO2/kWh
+    - Annual CO2 Reduction (metric tons) = (Generated kWh * Grid CO2 Factor) / 2204.62
 
     **TASK:**
-    Format the output with the following markdown structure. Use brackets for numeric values you calculate, like $[1234.56]. Your calculations should be informed by the complete project context provided below.
+    Format the output with the following markdown structure. Use brackets for numeric values you calculate, like $[1234.56]. Your calculations should be informed by the complete project context provided below. If Google Solar API data is present, prioritize it for solar calculations.
 
     ### Financial Analysis
-    **Estimated System Cost:** Calculate the total cost based on system sizes from the analysis (e.g., solar kW * cost/watt). Provide a single dollar value, like $[25000].
-    **Estimated Annual Electricity Savings/Revenue:** Calculate this based on generated kWh and average electricity cost. Provide a single dollar value, like $[1800].
+    **Estimated System Cost:** Use the recommended solar system size (kW) from the analysis. Calculation: [System Size kW] * 1000 * $${KNOWLEDGE_BASE.financial.costPerWatt.solar}. Provide a single dollar value, like $[25000].
+    **Estimated Annual Electricity Savings/Revenue:** Use the estimated annual production (kWh) from the analysis. Calculation: [Annual kWh] * $${KNOWLEDGE_BASE.financial.avgElectricityCost}. Provide a single dollar value, like $[1800]. If available, use the 20-year savings from the Solar API and divide by 20.
     **Simple Payback Period:** Calculate System Cost / Annual Savings. Provide a single number in years, like [13.9].
-    **20-Year Net Financial Impact:** Summarize the total savings over 20 years minus the initial cost.
+    **20-Year Net Financial Impact:** Summarize the total savings over 20 years minus the initial cost. Use the Solar API value if available: $${sunroofData?.savingsOver20Years || 'Calculate: (Annual Savings * 20) - System Cost'}.
 
     ### Environmental Impact
-    **Annual CO2 Reduction:** Calculate based on generated kWh * Grid CO2 factor. Provide a value in metric tons, like [7.5].
+    **Annual CO2 Reduction:** Calculate based on generated kWh. Provide a value in metric tons, like [7.5].
     **Equivalent to:** Use the EPA equivalents from the knowledge base to translate the CO2 reduction into "miles driven by a car" and "tree seedlings grown for 10 years".
     - Miles Driven: [18400]
     - Tree Seedlings Grown: [125]
@@ -645,7 +644,7 @@ const getPortfolioAnalysis = (analysisContext: string, role: UserRole | null, fu
 export const geminiService = {
     geocodeAddress,
     reverseGeocode,
-    analyzeLocationAndData,
+    analyzeLocation,
     getPropertyDetailsFromWeb,
     getPermittingAnalysis,
     generateAnalysisContext,

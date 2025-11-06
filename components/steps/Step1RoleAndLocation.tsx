@@ -3,8 +3,9 @@ import type { FormData, FormErrors, SunroofData } from '../../types';
 import { UserRole } from '../../types';
 import { geminiService } from '../../services/geminiService';
 import MapDisplay from '../MapDisplay';
-import { InfoIcon, SparklesIcon, ChevronDownIcon, ChevronUpIcon } from '../Icons';
+import { InfoIcon } from '../Icons';
 import ReferenceMaps from '../ReferenceMaps';
+import LocationDataSummary from '../LocationDataSummary';
 
 declare const L: any; // Declare Leaflet global
 
@@ -55,54 +56,21 @@ const Step1RoleAndLocation: React.FC<Step1Props> = ({
     const [analysisError, setAnalysisError] = useState<string | null>(null);
     /** State for when the optional text analysis is running. */
     const [isAnalyzing, setIsAnalyzing] = useState(false);
-
-    /** State to toggle the visibility of the optional data input section. */
-    const [showOptional, setShowOptional] = useState(false);
-    /** State for the optional user-pasted text (e.g., from Project Sunroof). */
-    const [pastedText, setPastedText] = useState('');
     
-    const handleEnhanceAnalysis = useCallback(async () => {
-        if (!locationCoords || !formData.location || !pastedText.trim()) return;
-
+    const analyzeFullLocation = useCallback(async (lat: number, lon: number, address: string) => {
         setIsAnalyzing(true);
         setAnalysisError(null);
-        
         try {
-            const result = await geminiService.analyzeLocationAndData(
-                locationCoords.lat, 
-                locationCoords.lon,
-                formData.location,
-                pastedText
-            );
-
-            if (result) {
-                const { sunroofData } = result;
-                
-                const updates: Partial<FormData> = {};
-                const autoFilledKeys: (keyof FormData)[] = [];
-                
-                updates.sunroofData = sunroofData;
-
-                if (sunroofData) {
-                    if (sunroofData.usableRoofArea) { updates.usableRoofArea = String(sunroofData.usableRoofArea).replace(/[^0-9.]/g, ''); autoFilledKeys.push('usableRoofArea'); }
-                    if (sunroofData.potentialSystemSizeKw) { updates.solarSystemSizeKw = String(sunroofData.potentialSystemSizeKw).replace(/[^0-9.]/g, ''); autoFilledKeys.push('solarSystemSizeKw'); }
-                    if (sunroofData.potentialYearlySavings) { updates.estimatedYearlySavings = String(sunroofData.potentialYearlySavings).replace(/[^0-9.]/g, ''); autoFilledKeys.push('estimatedYearlySavings'); }
-                    if (sunroofData.roofPitch) { updates.roofPitch = String(sunroofData.roofPitch).replace(/[^0-9.]/g, ''); autoFilledKeys.push('roofPitch'); }
-                }
-                
-                if (Object.keys(updates).length > 0) {
-                    onBulkDataChange(updates, autoFilledKeys);
-                }
-            } else {
-                setAnalysisError("The AI could not parse the provided text. Please ensure it's copied correctly and try again.");
-            }
+            const { updates, autoFilledKeys } = await geminiService.analyzeLocation(lat, lon, address);
+            onBulkDataChange(updates, autoFilledKeys);
         } catch (error) {
-            console.error("Failed to analyze pasted data:", error);
-            setAnalysisError(error instanceof Error ? error.message : "An error occurred during analysis. Please try again.");
+            console.error("Failed to auto-fill details:", error);
+            const errorMessage = error instanceof Error ? error.message : "An unknown error occurred during location analysis.";
+            setAnalysisError("Could not automatically fetch all property details. Please review and enter any missing information manually. Error: " + errorMessage);
         } finally {
             setIsAnalyzing(false);
         }
-    }, [locationCoords, formData.location, pastedText, onBulkDataChange]);
+    }, [onBulkDataChange]);
 
     const handleAddressSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
@@ -116,6 +84,7 @@ const Step1RoleAndLocation: React.FC<Step1Props> = ({
             if (coords) {
                 setLocationCoords(coords);
                 onDataChange('location', addressToGeocode);
+                await analyzeFullLocation(coords.lat, coords.lon, addressToGeocode);
             } else {
                 setAnalysisError(`Could not find location for "${addressToGeocode}". Please try a different address.`);
             }
@@ -128,7 +97,7 @@ const Step1RoleAndLocation: React.FC<Step1Props> = ({
     };
     
     const processCoords = useCallback(async (lat: number, lon: number) => {
-        if (!formData.role) return; // Role check is sufficient here
+        if (!formData.role || isLocating || isAnalyzing) return;
         
         setIsLocating(true);
         setAnalysisError(null);
@@ -138,6 +107,7 @@ const Step1RoleAndLocation: React.FC<Step1Props> = ({
                 setAddressInput(address);
                 onDataChange('location', address);
                 setLocationCoords({ lat, lon });
+                await analyzeFullLocation(lat, lon, address);
             } else {
                 throw new Error('No address found. Please click closer to a street or building.');
             }
@@ -147,7 +117,7 @@ const Step1RoleAndLocation: React.FC<Step1Props> = ({
         } finally {
             setIsLocating(false);
         }
-    }, [formData.role, onDataChange]);
+    }, [formData.role, onDataChange, analyzeFullLocation, isAnalyzing, isLocating]);
 
     const handleLocationSelect = useCallback((lat: number, lon: number) => {
         if (isLocating || isAnalyzing) return;
@@ -209,7 +179,7 @@ const Step1RoleAndLocation: React.FC<Step1Props> = ({
                             className="flex-shrink-0 px-4 py-2 text-sm font-semibold text-white bg-green-600 rounded-lg shadow-md hover:bg-green-700 transition-colors focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500 disabled:bg-slate-400 dark:disabled:bg-slate-600 disabled:cursor-not-allowed"
                             disabled={!formData.role || isBusy || !addressInput.trim()}
                         >
-                            {isLocating ? 'Finding...' : 'Find'}
+                            {isLocating ? 'Finding...' : isAnalyzing ? 'Analyzing...' : 'Find'}
                         </button>
                     </form>
                     <span className="hidden sm:inline-block mx-2 text-slate-400">or</span>
@@ -227,7 +197,7 @@ const Step1RoleAndLocation: React.FC<Step1Props> = ({
                 <MapDisplay
                     centerCoords={locationCoords}
                     onLocationSelect={handleLocationSelect}
-                    analysisStatus={'idle'}
+                    analysisStatus={isAnalyzing ? 'analyzing' : 'idle'}
                     countdown={0}
                     disabled={!formData.role || isBusy}
                 />
@@ -235,45 +205,14 @@ const Step1RoleAndLocation: React.FC<Step1Props> = ({
                  {analysisError && <p className="mt-2 text-sm text-red-600 dark:text-red-400">{analysisError}</p>}
             </div>
 
-            {/* Optional Data Input */}
-            <div className="border border-slate-200 dark:border-slate-700 rounded-lg">
-                <button
-                    type="button"
-                    onClick={() => setShowOptional(!showOptional)}
-                    className="w-full flex justify-between items-center p-4 bg-slate-50 dark:bg-slate-700/50 rounded-lg"
-                    aria-expanded={showOptional}
-                >
-                    <h3 className="font-semibold text-lg text-slate-800 dark:text-slate-200">Optional: Enhance Analysis with More Data</h3>
-                    {showOptional ? <ChevronUpIcon className="w-5 h-5" /> : <ChevronDownIcon className="w-5 h-5" />}
-                </button>
-                {showOptional && (
-                    <div className="p-4 space-y-4">
-                        <div>
-                            <label htmlFor="pasted-text" className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">Pasted Text from Project Sunroof</label>
-                            <textarea
-                                id="pasted-text"
-                                value={pastedText}
-                                onChange={(e) => setPastedText(e.target.value)}
-                                placeholder="Paste the text summary from your Project Sunroof analysis here..."
-                                className="w-full p-2 border rounded-lg bg-white dark:bg-slate-700 border-slate-300 dark:border-slate-600 focus:ring-2 focus:ring-green-500 focus:outline-none min-h-[100px]"
-                                disabled={!formData.role}
-                            />
-                        </div>
-                        <button onClick={handleEnhanceAnalysis} disabled={isBusy || !locationCoords || !formData.role || !pastedText.trim()} className="w-full flex items-center justify-center gap-2 px-6 py-2 font-bold text-white bg-green-600 rounded-lg shadow-md hover:bg-green-700 transition-colors focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500 disabled:bg-slate-400 dark:disabled:bg-slate-600 disabled:cursor-not-allowed">
-                            {isAnalyzing ? (
-                                <>
-                                    <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-white"></div>
-                                    Analyzing...
-                                </>
-                            ) : (
-                               <>
-                                 <SparklesIcon className="w-5 h-5" /> Enhance with Pasted Data
-                               </>
-                            )}
-                        </button>
-                    </div>
-                )}
-            </div>
+            <LocationDataSummary 
+                loading={isAnalyzing}
+                location={formData.location}
+                sunroof={formData.sunroofData}
+                eie={formData.eieData}
+                hydro={formData.hydroPreAnalysisData}
+                role={formData.role}
+            />
             
             <ReferenceMaps coords={locationCoords} />
 

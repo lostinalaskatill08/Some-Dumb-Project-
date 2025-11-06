@@ -372,7 +372,7 @@ const App: React.FC = () => {
 
     const analysisTasks: { key: AnalysisKey; task: Promise<AnalysisContent> }[] = [
         { key: 'energyAudit', task: geminiService.getEnergyAudit(analysisContext, formData.role) },
-        { key: 'solar', task: geminiService.getSolarAnalysis(analysisContext, formData.role) },
+        { key: 'solar', task: geminiService.getSolarAnalysis(analysisContext, formData.role, formData.sunroofData) },
         { key: 'wind', task: geminiService.getWindAnalysis(analysisContext, formData.role) },
         { key: 'buildingMaterials', task: geminiService.getBuildingMaterialsAnalysis(analysisContext, formData.role) },
     ];
@@ -523,7 +523,7 @@ setError(e instanceof Error ? e.message : 'An unknown error occurred during sale
     setLoadingStates(prev => ({...prev, finalReport: true}));
     try {
         const analysisContext = geminiService.generateAnalysisContext(formData, analysisResults.permitting.text);
-        const finalReportRes = await geminiService.getFinalReport(analysisContext, fullAnalysisText);
+        const finalReportRes = await geminiService.getFinalReport(analysisContext, fullAnalysisText, formData.sunroofData);
         setAnalysisResults(prev => ({...prev, finalReport: finalReportRes}));
     } catch(e) {
         console.error("Failed to generate final report:", e);
@@ -578,21 +578,6 @@ setError(e instanceof Error ? e.message : 'An unknown error occurred during sale
   const handleNext = useCallback(async () => {
     if (!validateForm()) return;
 
-    // Special handling for advancing from Step 1 in the regular flow
-    if (currentStep === 1 && !isSalesFlow) {
-        setIsGatheringDetails(true);
-        setError(null);
-        try {
-            const { updates, autoFilledKeys } = await geminiService.getPropertyDetailsFromWeb(formData.location);
-            handleBulkDataChange(updates, autoFilledKeys);
-        } catch (e) {
-            console.error("Failed to auto-fill details:", e);
-            setError("Could not automatically fetch all property details. Please review and enter any missing information manually.");
-        } finally {
-            setIsGatheringDetails(false);
-        }
-    }
-
     const nextStep = currentStep + 1;
     if (isSalesFlow) {
         if (nextStep === 3) {
@@ -608,7 +593,7 @@ setError(e instanceof Error ? e.message : 'An unknown error occurred during sale
     if (currentStep < currentFlowSteps.length) {
       setCurrentStep(nextStep);
     }
-  }, [currentStep, formData, isSalesFlow, runPermittingAnalysis, runRegularAnalysis, runSalesAnalysis, runSummary, runFinancing, runFinalReport, currentFlowSteps.length, handleBulkDataChange]);
+  }, [currentStep, isSalesFlow, runPermittingAnalysis, runRegularAnalysis, runSalesAnalysis, runSummary, runFinancing, runFinalReport, currentFlowSteps.length]);
   
   /**
    * Handles returning to the previous step.
@@ -639,10 +624,9 @@ setError(e instanceof Error ? e.message : 'An unknown error occurred during sale
       setIsConversationOpen(true);
   };
   
-  const isAnalyzing = Object.values(loadingStates).some(Boolean) || isGatheringDetails;
+  const isAnalyzing = Object.values(loadingStates).some(Boolean);
   
   const getNextButtonText = () => {
-      if (isGatheringDetails) return 'Gathering Details...';
       if (isAnalyzing) return 'Analyzing...';
       return 'Next';
   };

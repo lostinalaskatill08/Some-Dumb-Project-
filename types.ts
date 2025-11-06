@@ -205,9 +205,11 @@ export enum ProjectPhase { PLANNING = 'Planning', NEW_CONSTRUCTION = 'New Constr
 
 export interface SunroofData {
   usableSunlightHours: string | null;
-  usableRoofArea: string | null;
+  usableRoofArea: string | null; // in sq ft
   potentialSystemSizeKw: string | null;
-  potentialYearlySavings: string | null;
+  savingsOver20Years: string | null;
+  yearlyProductionDcKwh: string | null;
+  monthlyBill: string | null;
   roofPitch?: string | null;
   rawText: string;
 }
